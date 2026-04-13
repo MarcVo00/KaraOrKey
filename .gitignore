@@ -1,0 +1,96 @@
+# ── Python virtual environments (anywhere in the tree) ───────────────────────
+**/venv/
+**/.venv/
+
+# ── Python bytecode ───────────────────────────────────────────────────────────
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ── Generated song library (large audio files — user data) ──────────────────
+**/songs/
+**/temp/
+
+# ── Pretrained / downloaded model weights ────────────────────────────────────
+pretrained_models/
+~/.cache/torch/
+~/.local/share/demucs/
+
+# ── Claude Code internal data ────────────────────────────────────────────────
+.claw/
+
+# ── Distribution archives ────────────────────────────────────────────────────
+*.zip
+*.tar.gz
+*.rar
+
+# ── ServeurKaraOrKey — duplicate distribution folder, not needed in source control
+ServeurKaraOrKey/
+
+# ── Flutter web compiled output (regenerate with `flutter build web`) ────────
+*.wasm
+KaraOrKey/web/main.dart.js
+
+# ── Debug symbol files (generated, large, not needed in git) ─────────────────
+*.js.symbols
+
+# ── Flutter / Dart tooling & build output ────────────────────────────────────
+**/.dart_tool/
+**/.packages
+**/.pub-cache/
+**/.pub/
+**/build/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+*.iml
+
+# ── Android Gradle cache ──────────────────────────────────────────────────────
+app/android/.gradle/
+app/android/.kotlin/
+app/android/local.properties
+app/android/app/debug/
+app/android/app/release/
+app/android/app/profile/
+
+# ── iOS / macOS ───────────────────────────────────────────────────────────────
+app/ios/Pods/
+app/ios/.symlinks/
+app/ios/Flutter/Flutter.framework
+app/ios/Flutter/Flutter.podspec
+app/macos/Pods/
+app/macos/.symlinks/
+
+# ── Environment variables ────────────────────────────────────────────────────
+.env
+.env.*
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Test & coverage artefacts ────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Python packaging artefacts ───────────────────────────────────────────────
+dist/
+*.egg-info/
+
+# ── IDE & editors ────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS files ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Temporary / misc ─────────────────────────────────────────────────────────
+*.tmp
+*.bak
+*.orig
