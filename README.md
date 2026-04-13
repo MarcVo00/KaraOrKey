@@ -33,9 +33,32 @@ A networked, AI-powered karaoke system that lets you host a karaoke party over y
 
 - **Python 3.8+**
 - **FFmpeg** — must be available in your system `PATH`
+- **Flutter SDK** — required to rebuild the web UI after cloning (see below)
 - **Windows** (the launcher script is `.bat`; manual setup works cross-platform)
 
-## Quick start (Windows)
+## Setup after cloning
+
+The compiled Flutter web assets are not stored in this repository (they are too large). You need to build them once before running the app.
+
+**1. Build the Flutter web app**
+
+```bash
+cd app
+flutter pub get
+flutter build web --release
+```
+
+**2. Copy the build output into the distribution folder**
+
+```bash
+# Windows (PowerShell)
+Copy-Item -Recurse -Force app\build\web\* KaraOrKey\web\
+
+# Linux / macOS
+cp -r app/build/web/* KaraOrKey/web/
+```
+
+**3. Run the app**
 
 ```bat
 KaraOrKey\start.bat
@@ -50,7 +73,7 @@ The script will:
 
 Open `http://localhost:8080` on the TV screen. Other devices connect using `http://<your-local-ip>:8080`.
 
-## Manual setup (cross-platform)
+## Manual backend setup (cross-platform)
 
 ```bash
 cd KaraOrKey/backend
@@ -75,21 +98,20 @@ python -m http.server 8080
 ## Project structure
 
 ```
-Karaorkey/
+KaraOrKey-repo/
 ├── app/                    # Flutter app source code
 │   ├── lib/main.dart       # Full Flutter UI (TV mode, DJ mode, queue, playback)
 │   └── pubspec.yaml        # Flutter dependencies
 ├── backend/                # Python backend source code
 │   ├── server.py           # Flask + Socket.IO server, room management
-│   ├── factory.py          # Song processing pipeline
-│   └── requirements.txt    # Python dependencies
-├── KaraOrKey/              # Ready-to-run distribution (backend + prebuilt web)
-│   ├── start.bat           # Windows launcher
-│   ├── backend/
-│   └── web/                # Precompiled Flutter web app
-├── pretrained_models/      # Demucs 2-stem model weights
-└── ServeurKaraOrKey/       # Alternative server distribution
+│   └── factory.py          # Song processing pipeline
+└── KaraOrKey/              # Ready-to-run distribution folder
+    ├── start.bat           # Windows launcher
+    ├── backend/            # Backend copy with requirements.txt
+    └── web/                # Serves the Flutter web app (populated after build)
 ```
+
+> `pretrained_models/` (Demucs weights) and song libraries are not committed — they are generated at runtime or downloaded automatically by Demucs on first use.
 
 ## API reference
 
@@ -125,7 +147,7 @@ YouTube URL
     → Demucs (AI stem separation: vocals + instrumental)
     → LRCLIB API (fetch timed lyrics)
     → Unidecode (add phonetic romanization)
-    → backend/songs/{Artist - Track}/
+    → KaraOrKey/backend/songs/{Artist - Track}/
           accompaniment.wav
           vocals.wav
           lyrics.lrc
