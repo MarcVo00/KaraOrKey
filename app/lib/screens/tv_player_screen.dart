@@ -198,7 +198,28 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
     final progress = _duration.inMilliseconds > 0
         ? (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0) : 0.0;
 
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final confirm = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text("Quitter l'écran TV ?"),
+            content: const Text("La salle n'aura plus d'écran TV. Continuer ?"),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Annuler")),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text("Quitter", style: TextStyle(color: Colors.white)),
+              ),
+            ],
+          ),
+        );
+        if ((confirm ?? false) && context.mounted) Navigator.pop(context);
+      },
+      child: Scaffold(
       backgroundColor: Colors.black,
       body: GestureDetector(
         onTap: () => setState(() => _showVolumeBar = !_showVolumeBar),
@@ -302,6 +323,7 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
             ),
         ]),
       ),
+      ), // PopScope
     );
   }
 

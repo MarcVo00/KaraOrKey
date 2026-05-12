@@ -122,6 +122,7 @@ def get_songs():
         if os.path.isdir(folder_path) and os.path.exists(os.path.join(folder_path, "accompaniment.wav")):
             songs_list.append({"id": item, "title": item,
                                 "has_lyrics": os.path.exists(os.path.join(folder_path, "lyrics.lrc"))})
+    songs_list.sort(key=lambda x: x['title'].lower())
     return jsonify(songs_list)
 
 @app.route('/api/play/<song_id>/<file_type>', methods=['GET'])
