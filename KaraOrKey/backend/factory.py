@@ -33,18 +33,24 @@ def sanitize_filename(name):
 
 def clean_title(title):
     if not title: return ""
-    # 1. On enlève les parenthèses, crochets et guillemets CJK (ex: 「Audio」)
+    # 1. Guillemets droits : garder le contenu, enlever les guillemets
+    #    ex: TWICE "The Feels" M/V → TWICE The Feels M/V
+    title = re.sub(r'"([^"]*)"', r'\1', title)
+
+    # 2. Brackets standard + CJK (contenu entièrement supprimé)
     title = re.sub(r'\(.*?\)|\[.*?\]|「.*?」|『.*?』|【.*?】|〔.*?〕|《.*?》|〈.*?〉', '', title)
-    
-    # 2. On coupe tout ce qui se trouve après un "ft.", "feat", ou "|"
-    # Ex: "W/n - id 072019 | 3107 ft 267" devient "W/n - id 072019 "
+
+    # 3. Couper après ft., feat ou |
     title = re.split(r'\||\b[Ff][Tt]\b|\b[Ff][Ee][Aa][Tt]\b', title)[0]
-    
-    # 3. On enlève les mots parasites
-    parasites = ["official audio", "official video", "lyrics", "lyric video", "hd", "mv", "music video"]
+
+    # 4. Mots parasites (regex pour gérer m/v, \bmv\b, etc.)
+    parasites = [
+        r'official audio', r'official video', r'lyrics', r'lyric video',
+        r'music video', r'm/v', r'\bmv\b', r'\bhd\b',
+    ]
     for p in parasites:
-        title = re.compile(re.escape(p), re.IGNORECASE).sub('', title)
-        
+        title = re.compile(p, re.IGNORECASE).sub('', title)
+
     return title.strip(' -_')
 
 def add_phonetics(lrc_text):
