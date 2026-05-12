@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
@@ -18,6 +19,7 @@ class TVPlayerScreen extends StatefulWidget {
 class _TVPlayerScreenState extends State<TVPlayerScreen> {
   late IO.Socket socket;
   late AudioPlayer _tvPlayer;
+
   List<LyricLine> lyrics = [];
   int currentLyricIndex = -1;
   String currentTitle = "Prêt à chanter !";
@@ -25,7 +27,11 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
   Duration _duration = Duration.zero;
   double _volume = 1.0;
   bool _showVolumeBar = false;
+  bool _isPaused = false;
   bool isReconnecting = false;
+  List<dynamic> _queue = [];
+
+  Timer? _syncTimer;
 
   @override
   void initState() {
@@ -33,6 +39,7 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
     WakelockPlus.enable();
     _tvPlayer = AudioPlayer();
     _initSocket();
+
     _tvPlayer.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed) {
         socket.emit('play_next');
@@ -45,44 +52,40 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
     _tvPlayer.positionStream.listen((p) {
       if (mounted) { setState(() => _position = p); _syncLyrics(p); }
     });
+
+    // Émet la position toutes les 5s pour permettre la correction de drift côté DJ
+    _syncTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted) socket.emit('position_sync', {'position_ms': _position.inMilliseconds});
+    });
   }
 
   void _resetPlaybackState() {
     setState(() {
-      lyrics = [];
-      currentLyricIndex = -1;
+      lyrics = []; currentLyricIndex = -1;
       currentTitle = "Prêt à chanter !";
-      _position = Duration.zero;
-      _duration = Duration.zero;
+      _position = Duration.zero; _duration = Duration.zero;
+      _isPaused = false;
     });
   }
 
-  void _joinRoom() {
-    socket.emit('join_karaoke_room', {
-      'room': widget.roomName,
-      'role': 'tv',
-      'password': widget.password,
-    });
-  }
+  void _joinRoom() => socket.emit('join_karaoke_room', {
+    'room': widget.roomName, 'role': 'tv', 'password': widget.password,
+  });
 
   void _initSocket() {
-    socket = IO.io(
-      baseUrl,
-      IO.OptionBuilder()
-          .setTransports(['websocket'])
-          .disableAutoConnect()
-          .enableReconnection()
-          .setReconnectionAttempts(10)
-          .setReconnectionDelay(2000)
-          .build(),
-    );
+    socket = IO.io(baseUrl, IO.OptionBuilder()
+        .setTransports(['websocket'])
+        .disableAutoConnect()
+        .enableReconnection()
+        .setReconnectionAttempts(10)
+        .setReconnectionDelay(2000)
+        .build());
     socket.connect();
 
     socket.onConnect((_) {
       if (mounted) setState(() => isReconnecting = false);
       _joinRoom();
     });
-
     socket.onDisconnect((_) {
       if (mounted) setState(() => isReconnecting = true);
     });
@@ -94,14 +97,32 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
         Navigator.pop(context);
       }
     });
+    socket.on('room_deleted', (_) { if (mounted) Navigator.pop(context); });
 
-    socket.on('room_deleted', (_) {
-      if (mounted) Navigator.pop(context);
+    socket.on('sync_state', (data) {
+      if (mounted) setState(() {
+        _queue = List<dynamic>.from(data['queue'] ?? []);
+        _isPaused = data['paused'] ?? false;
+      });
     });
 
-    socket.on('start_song', (data) => _startVisuals(data['id'], data['title']));
+    socket.on('start_song', (data) {
+      setState(() => _isPaused = false);
+      _startVisuals(data['id'], data['title']);
+    });
+
     socket.on('stop_song', (_) {
       if (mounted) { _resetPlaybackState(); _tvPlayer.stop(); }
+    });
+
+    socket.on('pause_song', (_) {
+      _tvPlayer.pause();
+      if (mounted) setState(() => _isPaused = true);
+    });
+
+    socket.on('resume_song', (_) {
+      _tvPlayer.play();
+      if (mounted) setState(() => _isPaused = false);
     });
   }
 
@@ -121,27 +142,24 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
       final response = await http.get(Uri.parse('$baseUrl/api/play/$songId/lyrics'));
       if (response.statusCode == 200) {
         final lines = utf8.decode(response.bodyBytes).split('\n');
-        final parsedLyrics = <LyricLine>[];
-        final regExp = RegExp(r"^\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)");
-        for (var line in lines) {
-          final match = regExp.firstMatch(line);
-          if (match != null) {
-            final text = match.group(4)!.trim();
+        final parsed = <LyricLine>[];
+        final re = RegExp(r"^\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)");
+        for (final line in lines) {
+          final m = re.firstMatch(line);
+          if (m != null) {
+            final text = m.group(4)!.trim();
             if (text.isNotEmpty) {
-              final subsecStr = match.group(3)!;
-              final ms = subsecStr.length == 2 ? int.parse(subsecStr) * 10 : int.parse(subsecStr);
-              parsedLyrics.add(LyricLine(
-                timestamp: Duration(
-                  minutes: int.parse(match.group(1)!),
-                  seconds: int.parse(match.group(2)!),
-                  milliseconds: ms,
-                ),
+              final sub = m.group(3)!;
+              final ms = sub.length == 2 ? int.parse(sub) * 10 : int.parse(sub);
+              parsed.add(LyricLine(
+                timestamp: Duration(minutes: int.parse(m.group(1)!),
+                    seconds: int.parse(m.group(2)!), milliseconds: ms),
                 text: text,
               ));
             }
           }
         }
-        if (mounted) setState(() => lyrics = parsedLyrics);
+        if (mounted) setState(() => lyrics = parsed);
       }
     } catch (_) {}
   }
@@ -150,13 +168,10 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
     if (lyrics.isEmpty) return;
     for (int i = 0; i < lyrics.length; i++) {
       final isLast = i == lyrics.length - 1;
-      final isCurrent = isLast
+      final ok = isLast
           ? position >= lyrics[i].timestamp
           : position >= lyrics[i].timestamp && position < lyrics[i + 1].timestamp;
-      if (isCurrent) {
-        if (currentLyricIndex != i) setState(() => currentLyricIndex = i);
-        break;
-      }
+      if (ok) { if (currentLyricIndex != i) setState(() => currentLyricIndex = i); break; }
     }
   }
 
@@ -167,7 +182,13 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
   }
 
   @override
-  void dispose() { socket.dispose(); _tvPlayer.dispose(); WakelockPlus.disable(); super.dispose(); }
+  void dispose() {
+    _syncTimer?.cancel();
+    socket.dispose();
+    _tvPlayer.dispose();
+    WakelockPlus.disable();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -175,8 +196,7 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
     final nextLine = (lyrics.isNotEmpty && currentLyricIndex >= 0 && currentLyricIndex + 1 < lyrics.length)
         ? lyrics[currentLyricIndex + 1].text : "";
     final progress = _duration.inMilliseconds > 0
-        ? (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0)
-        : 0.0;
+        ? (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0) : 0.0;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -184,7 +204,8 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
         onTap: () => setState(() => _showVolumeBar = !_showVolumeBar),
         child: Stack(children: [
           Column(children: [
-            // --- Titre + indicateur reconnexion ---
+
+            // --- Titre + indicateurs ---
             Padding(
               padding: const EdgeInsets.only(top: 50.0, bottom: 8.0),
               child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -195,6 +216,11 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
                   const Text("Reconnexion...", style: TextStyle(color: Colors.orange, fontSize: 12)),
                   const SizedBox(width: 16),
                 ],
+                if (_isPaused)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 12),
+                    child: Icon(Icons.pause_circle_outline, color: Colors.white38, size: 22),
+                  ),
                 Text(currentTitle,
                     style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
               ]),
@@ -206,11 +232,8 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 40.0),
                 child: Column(children: [
                   LinearProgressIndicator(
-                    value: progress,
-                    backgroundColor: Colors.white12,
-                    color: const Color(0xFFE94560),
-                    minHeight: 4,
-                  ),
+                      value: progress, backgroundColor: Colors.white12,
+                      color: _isPaused ? Colors.white38 : const Color(0xFFE94560), minHeight: 4),
                   const SizedBox(height: 4),
                   Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
                     Text(_fmt(_position), style: const TextStyle(color: Colors.white38, fontSize: 12)),
@@ -220,80 +243,59 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
               ),
             const SizedBox(height: 12),
 
-            // --- Zone paroles ---
+            // --- Zone paroles / écran attente ---
             Expanded(
               child: lyrics.isEmpty
-                  ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      const Icon(Icons.music_note, size: 80, color: Colors.white24),
-                      const SizedBox(height: 20),
-                      Text("En attente du DJ...", style: TextStyle(color: Colors.grey[600], fontSize: 24)),
-                    ]))
+                  ? _buildWaitingScreen()
                   : Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 40.0),
                       child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
                         AnimatedSwitcher(
                           duration: const Duration(milliseconds: 400),
-                          transitionBuilder: (child, animation) => FadeTransition(
-                            opacity: animation,
-                            child: SlideTransition(
-                              position: Tween<Offset>(begin: const Offset(0, 0.2), end: Offset.zero)
-                                  .animate(animation),
-                              child: child,
-                            ),
-                          ),
-                          child: Text(
-                            currentLine,
-                            key: ValueKey<String>('current_$currentLine'),
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              fontSize: 48, fontWeight: FontWeight.bold,
-                              color: Color(0xFFE94560),
-                              shadows: [Shadow(blurRadius: 15, color: Color(0xFFE94560))],
-                            ),
-                          ),
+                          transitionBuilder: (child, anim) => FadeTransition(opacity: anim,
+                              child: SlideTransition(
+                                  position: Tween<Offset>(begin: const Offset(0, 0.2), end: Offset.zero)
+                                      .animate(anim), child: child)),
+                          child: Text(currentLine,
+                              key: ValueKey<String>('cur_$currentLine'),
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold,
+                                  color: _isPaused ? Colors.white38 : const Color(0xFFE94560),
+                                  shadows: _isPaused ? [] : const [
+                                    Shadow(blurRadius: 15, color: Color(0xFFE94560))
+                                  ])),
                         ),
                         const SizedBox(height: 50),
                         AnimatedSwitcher(
                           duration: const Duration(milliseconds: 400),
-                          transitionBuilder: (child, animation) =>
-                              FadeTransition(opacity: animation, child: child),
-                          child: Text(
-                            nextLine,
-                            key: ValueKey<String>('next_$nextLine'),
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 32, color: Colors.white30),
-                          ),
+                          transitionBuilder: (child, anim) => FadeTransition(opacity: anim, child: child),
+                          child: Text(nextLine,
+                              key: ValueKey<String>('nxt_$nextLine'),
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(fontSize: 32, color: Colors.white30)),
                         ),
                       ]),
                     ),
             ),
           ]),
 
-          // --- Panneau volume (apparaît au tap sur l'écran) ---
+          // --- Panneau volume (tap pour afficher) ---
           if (_showVolumeBar)
             Positioned(
               bottom: 30, left: 60, right: 60,
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                 decoration: BoxDecoration(
-                  color: Colors.black87,
-                  borderRadius: BorderRadius.circular(30),
+                  color: Colors.black87, borderRadius: BorderRadius.circular(30),
                   border: Border.all(color: Colors.white24),
                 ),
                 child: Row(children: [
                   const Icon(Icons.volume_down, color: Colors.white54),
-                  Expanded(
-                    child: Slider(
-                      value: _volume,
-                      min: 0, max: 1,
-                      activeColor: const Color(0xFFE94560),
-                      inactiveColor: Colors.white24,
-                      onChanged: (v) {
-                        setState(() => _volume = v);
-                        _tvPlayer.setVolume(v);
-                      },
-                    ),
-                  ),
+                  Expanded(child: Slider(
+                    value: _volume, min: 0, max: 1,
+                    activeColor: const Color(0xFFE94560), inactiveColor: Colors.white24,
+                    onChanged: (v) { setState(() => _volume = v); _tvPlayer.setVolume(v); },
+                  )),
                   const Icon(Icons.volume_up, color: Colors.white54),
                 ]),
               ),
@@ -301,5 +303,53 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
         ]),
       ),
     );
+  }
+
+  Widget _buildWaitingScreen() {
+    if (_queue.isEmpty) {
+      return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+        const Icon(Icons.music_note, size: 80, color: Colors.white24),
+        const SizedBox(height: 20),
+        Text("En attente du DJ...", style: TextStyle(color: Colors.grey[600], fontSize: 24)),
+      ]));
+    }
+
+    // File d'attente visible quand aucune chanson ne joue
+    return Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Text("À venir", style: TextStyle(color: Colors.grey[600], fontSize: 18, letterSpacing: 3)),
+      const SizedBox(height: 30),
+      ..._queue.take(5).toList().asMap().entries.map((e) {
+        final isFirst = e.key == 0;
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 60),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            color: isFirst ? const Color(0xFFE94560).withOpacity(0.15) : Colors.white.withOpacity(0.04),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isFirst ? const Color(0xFFE94560).withOpacity(0.5) : Colors.white12,
+            ),
+          ),
+          child: Row(children: [
+            Icon(isFirst ? Icons.play_arrow : Icons.queue_music,
+                color: isFirst ? const Color(0xFFE94560) : Colors.white38, size: 20),
+            const SizedBox(width: 12),
+            Expanded(child: Text(e.value['title'],
+                style: TextStyle(
+                    fontSize: isFirst ? 20 : 16,
+                    color: isFirst ? Colors.white : Colors.white54,
+                    fontWeight: isFirst ? FontWeight.bold : FontWeight.normal),
+                maxLines: 1, overflow: TextOverflow.ellipsis)),
+          ]),
+        );
+      }),
+      if (_queue.length > 5)
+        Padding(
+          padding: const EdgeInsets.only(top: 12),
+          child: Text("+ ${_queue.length - 5} autres",
+              style: TextStyle(color: Colors.grey[700], fontSize: 14)),
+        ),
+    ]);
   }
 }

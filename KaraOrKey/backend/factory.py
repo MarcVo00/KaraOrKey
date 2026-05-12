@@ -160,30 +160,34 @@ def run_factory(youtube_url, task_id=None):
     with open(os.path.join(final_song_folder, "lyrics.lrc"), "w", encoding="utf-8") as f:
         f.write(lrc_content)
     
-    print(f"🪄 Lancement de Demucs pour : {folder_name}")
+    logging.info(f"Lancement de Demucs pour : {folder_name}")
     cmd = ["demucs", "--two-stems=vocals", "-n", "htdemucs", "-o", TEMP_DIR, temp_audio_path]
-    
+    demucs_output_folder = os.path.join(TEMP_DIR, "htdemucs", video_id)
+
     process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if task_id:
         active_processes[task_id] = process
-        
-    process.wait() 
-    
-    if task_id in active_processes:
-        del active_processes[task_id]
-        
+
+    try:
+        process.wait()
+    finally:
+        # Nettoyage garanti même si le process est tué ou lève une exception
+        if task_id in active_processes:
+            del active_processes[task_id]
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+        # Dossier de sortie Demucs (contient les stems intermédiaires)
+        if os.path.isdir(demucs_output_folder) and process.returncode != 0:
+            import shutil as _shutil
+            _shutil.rmtree(demucs_output_folder, ignore_errors=True)
+
     if process.returncode != 0:
         logging.warning("Demucs interrompu (annulation ou erreur).")
         raise Exception("Demucs a été annulé par l'utilisateur.")
-    
-    demucs_output_folder = os.path.join(TEMP_DIR, "htdemucs", video_id)
+
     accompaniment_src = os.path.join(demucs_output_folder, "no_vocals.wav")
-    
     if os.path.exists(accompaniment_src):
         os.rename(accompaniment_src, os.path.join(final_song_folder, "accompaniment.wav"))
         vocals_src = os.path.join(demucs_output_folder, "vocals.wav")
         if os.path.exists(vocals_src):
             os.rename(vocals_src, os.path.join(final_song_folder, "vocals.wav"))
-            
-    if os.path.exists(temp_audio_path):
-        os.remove(temp_audio_path)
