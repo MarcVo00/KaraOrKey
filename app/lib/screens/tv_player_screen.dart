@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:socket_io_client/socket_io_client.dart' as IO;
@@ -55,7 +56,6 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
       if (mounted && !_isDragging) { setState(() => _position = p); _syncLyrics(p); }
     });
 
-    // Émet la position toutes les 5s pour permettre la correction de drift côté DJ
     _syncTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (mounted) socket.emit('position_sync', {'position_ms': _position.inMilliseconds});
     });
@@ -91,7 +91,6 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
     socket.onDisconnect((_) {
       if (mounted) setState(() => isReconnecting = true);
     });
-
     socket.on('join_error', (data) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -107,31 +106,30 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
         _isPaused = data['paused'] ?? false;
       });
     });
-
     socket.on('start_song', (data) {
       setState(() => _isPaused = false);
       _startVisuals(data['id'], data['title']);
     });
-
     socket.on('stop_song', (_) {
       if (mounted) { _resetPlaybackState(); _tvPlayer.stop(); }
     });
-
     socket.on('pause_song', (_) {
       _tvPlayer.pause();
       if (mounted) setState(() => _isPaused = true);
     });
-
     socket.on('resume_song', (_) {
       _tvPlayer.play();
       if (mounted) setState(() => _isPaused = false);
     });
-
     socket.on('seek_to', (data) {
       final ms = (data['position_ms'] as num?)?.toInt() ?? 0;
       _tvPlayer.seek(Duration(milliseconds: ms));
     });
   }
+
+  // ==========================================
+  // LECTURE
+  // ==========================================
 
   Future<void> _startVisuals(String songId, String title) async {
     setState(() { currentTitle = title; lyrics = []; currentLyricIndex = -1; });
@@ -182,6 +180,56 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
     }
   }
 
+  // ==========================================
+  // CONTRÔLES CLAVIER / TÉLÉCOMMANDE
+  // ==========================================
+
+  void _togglePause() {
+    socket.emit(_isPaused ? 'command_resume' : 'command_pause');
+  }
+
+  void _seekRelative(int deltaMs) {
+    if (_duration == Duration.zero) return;
+    final newMs = (_position.inMilliseconds + deltaMs)
+        .clamp(0, _duration.inMilliseconds)
+        .toInt();
+    socket.emit('command_seek', {'position_ms': newMs});
+  }
+
+  void _adjustVolume(double delta) {
+    final newVol = (_volume + delta).clamp(0.0, 1.0);
+    setState(() => _volume = newVol);
+    _tvPlayer.setVolume(newVol);
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.space ||
+        key == LogicalKeyboardKey.mediaPlayPause ||
+        key == LogicalKeyboardKey.select) {
+      if (_duration > Duration.zero) _togglePause();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      _seekRelative(-10000);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      _seekRelative(10000);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      _adjustVolume(0.1);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      _adjustVolume(-0.1);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
   String _fmt(Duration d) {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
@@ -196,6 +244,10 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
     WakelockPlus.disable();
     super.dispose();
   }
+
+  // ==========================================
+  // BUILD
+  // ==========================================
 
   @override
   Widget build(BuildContext context) {
@@ -227,135 +279,150 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
         );
         if ((confirm ?? false) && context.mounted) Navigator.pop(context);
       },
-      child: Scaffold(
-      backgroundColor: Colors.black,
-      body: GestureDetector(
-        onTap: () => setState(() => _showVolumeBar = !_showVolumeBar),
-        child: Stack(children: [
-          Column(children: [
+      child: Focus(
+        autofocus: true,
+        onKeyEvent: _handleKeyEvent,
+        child: Scaffold(
+          backgroundColor: Colors.black,
+          body: GestureDetector(
+            onTap: () => setState(() => _showVolumeBar = !_showVolumeBar),
+            child: Stack(children: [
+              Column(children: [
 
-            // --- Titre + indicateurs ---
-            Padding(
-              padding: const EdgeInsets.only(top: 50.0, bottom: 8.0),
-              child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                if (isReconnecting) ...[
-                  const SizedBox(width: 12, height: 12,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange)),
-                  const SizedBox(width: 8),
-                  const Text("Reconnexion...", style: TextStyle(color: Colors.orange, fontSize: 12)),
-                  const SizedBox(width: 16),
-                ],
-                if (_isPaused)
-                  const Padding(
-                    padding: EdgeInsets.only(right: 12),
-                    child: Icon(Icons.pause_circle_outline, color: Colors.white38, size: 22),
-                  ),
-                Text(currentTitle,
-                    style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
-              ]),
-            ),
+                // --- Titre + indicateurs ---
+                Padding(
+                  padding: const EdgeInsets.only(top: 50.0, bottom: 8.0),
+                  child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    if (isReconnecting) ...[
+                      const SizedBox(width: 12, height: 12,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange)),
+                      const SizedBox(width: 8),
+                      const Text("Reconnexion...", style: TextStyle(color: Colors.orange, fontSize: 12)),
+                      const SizedBox(width: 16),
+                    ],
+                    if (_isPaused)
+                      const Padding(
+                        padding: EdgeInsets.only(right: 12),
+                        child: Icon(Icons.pause_circle_outline, color: Colors.white38, size: 22),
+                      ),
+                    Text(currentTitle,
+                        style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold,
+                            color: Colors.blueAccent)),
+                  ]),
+                ),
 
-            // --- Barre de progression (seek) ---
-            if (_duration > Duration.zero)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 28.0),
-                child: Column(children: [
-                  SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      trackHeight: 4,
-                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-                      overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
-                      activeTrackColor: _isPaused ? Colors.white38 : const Color(0xFFE94560),
-                      inactiveTrackColor: Colors.white12,
-                      thumbColor: _isPaused ? Colors.white38 : const Color(0xFFE94560),
-                      overlayColor: const Color(0xFFE94560).withOpacity(0.2),
-                    ),
-                    child: Slider(
-                      value: displayProgress,
-                      min: 0, max: 1,
-                      onChangeStart: (v) => setState(() { _isDragging = true; _dragPosition = v; }),
-                      onChanged: (v) => setState(() => _dragPosition = v),
-                      onChangeEnd: (v) {
-                        setState(() => _isDragging = false);
-                        final ms = (v * _duration.inMilliseconds).round();
-                        socket.emit('command_seek', {'position_ms': ms});
-                      },
-                    ),
-                  ),
+                // --- Barre de progression (seek) ---
+                if (_duration > Duration.zero)
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12.0),
-                    child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                      Text(_fmt(_isDragging
-                              ? Duration(milliseconds: (_dragPosition * _duration.inMilliseconds).round())
-                              : _position),
-                          style: const TextStyle(color: Colors.white38, fontSize: 12)),
-                      Text(_fmt(_duration), style: const TextStyle(color: Colors.white38, fontSize: 12)),
+                    padding: const EdgeInsets.symmetric(horizontal: 28.0),
+                    child: Column(children: [
+                      SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 4,
+                          thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                          overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+                          activeTrackColor: _isPaused ? Colors.white38 : const Color(0xFFE94560),
+                          inactiveTrackColor: Colors.white12,
+                          thumbColor: _isPaused ? Colors.white38 : const Color(0xFFE94560),
+                          overlayColor: const Color(0xFFE94560).withOpacity(0.2),
+                        ),
+                        child: Slider(
+                          value: displayProgress, min: 0, max: 1,
+                          onChangeStart: (v) => setState(() { _isDragging = true; _dragPosition = v; }),
+                          onChanged: (v) => setState(() => _dragPosition = v),
+                          onChangeEnd: (v) {
+                            setState(() => _isDragging = false);
+                            final ms = (v * _duration.inMilliseconds).round();
+                            socket.emit('command_seek', {'position_ms': ms});
+                          },
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12.0),
+                        child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                          Text(_fmt(_isDragging
+                                  ? Duration(milliseconds: (_dragPosition * _duration.inMilliseconds).round())
+                                  : _position),
+                              style: const TextStyle(color: Colors.white38, fontSize: 12)),
+                          Text(_fmt(_duration),
+                              style: const TextStyle(color: Colors.white38, fontSize: 12)),
+                        ]),
+                      ),
                     ]),
                   ),
-                ]),
-              ),
-            const SizedBox(height: 12),
+                const SizedBox(height: 12),
 
-            // --- Zone paroles / écran attente ---
-            Expanded(
-              child: lyrics.isEmpty
-                  ? _buildWaitingScreen()
-                  : Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 40.0),
-                      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                        AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 400),
-                          transitionBuilder: (child, anim) => FadeTransition(opacity: anim,
-                              child: SlideTransition(
-                                  position: Tween<Offset>(begin: const Offset(0, 0.2), end: Offset.zero)
-                                      .animate(anim), child: child)),
-                          child: Text(currentLine,
-                              key: ValueKey<String>('cur_$currentLine'),
-                              textAlign: TextAlign.center,
-                              style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold,
-                                  color: _isPaused ? Colors.white38 : const Color(0xFFE94560),
-                                  shadows: _isPaused ? [] : const [
-                                    Shadow(blurRadius: 15, color: Color(0xFFE94560))
-                                  ])),
+                // --- Zone paroles / écran attente ---
+                Expanded(
+                  child: lyrics.isEmpty
+                      ? _buildWaitingScreen()
+                      : Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 40.0),
+                          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                            AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 400),
+                              transitionBuilder: (child, anim) => FadeTransition(opacity: anim,
+                                  child: SlideTransition(
+                                      position: Tween<Offset>(
+                                              begin: const Offset(0, 0.2), end: Offset.zero)
+                                          .animate(anim),
+                                      child: child)),
+                              child: Text(currentLine,
+                                  key: ValueKey<String>('cur_$currentLine'),
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold,
+                                      color: _isPaused ? Colors.white38 : const Color(0xFFE94560),
+                                      shadows: _isPaused ? [] : const [
+                                        Shadow(blurRadius: 15, color: Color(0xFFE94560))
+                                      ])),
+                            ),
+                            const SizedBox(height: 50),
+                            AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 400),
+                              transitionBuilder: (child, anim) =>
+                                  FadeTransition(opacity: anim, child: child),
+                              child: Text(nextLine,
+                                  key: ValueKey<String>('nxt_$nextLine'),
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(fontSize: 32, color: Colors.white30)),
+                            ),
+                          ]),
                         ),
-                        const SizedBox(height: 50),
-                        AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 400),
-                          transitionBuilder: (child, anim) => FadeTransition(opacity: anim, child: child),
-                          child: Text(nextLine,
-                              key: ValueKey<String>('nxt_$nextLine'),
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(fontSize: 32, color: Colors.white30)),
-                        ),
-                      ]),
-                    ),
-            ),
-          ]),
-
-          // --- Panneau volume (tap pour afficher) ---
-          if (_showVolumeBar)
-            Positioned(
-              bottom: 30, left: 60, right: 60,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                decoration: BoxDecoration(
-                  color: Colors.black87, borderRadius: BorderRadius.circular(30),
-                  border: Border.all(color: Colors.white24),
                 ),
-                child: Row(children: [
-                  const Icon(Icons.volume_down, color: Colors.white54),
-                  Expanded(child: Slider(
-                    value: _volume, min: 0, max: 1,
-                    activeColor: const Color(0xFFE94560), inactiveColor: Colors.white24,
-                    onChanged: (v) { setState(() => _volume = v); _tvPlayer.setVolume(v); },
-                  )),
-                  const Icon(Icons.volume_up, color: Colors.white54),
-                ]),
-              ),
-            ),
-        ]),
+
+                // --- Aide raccourcis (affichée brièvement au bas) ---
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Text("◀▶ ±10s  |  ▲▼ Volume  |  Espace = Pause",
+                      style: TextStyle(color: Colors.white12, fontSize: 11)),
+                ),
+              ]),
+
+              // --- Panneau volume ---
+              if (_showVolumeBar)
+                Positioned(
+                  bottom: 50, left: 60, right: 60,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.black87, borderRadius: BorderRadius.circular(30),
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: Row(children: [
+                      const Icon(Icons.volume_down, color: Colors.white54),
+                      Expanded(child: Slider(
+                        value: _volume, min: 0, max: 1,
+                        activeColor: const Color(0xFFE94560), inactiveColor: Colors.white24,
+                        onChanged: (v) { setState(() => _volume = v); _tvPlayer.setVolume(v); },
+                      )),
+                      const Icon(Icons.volume_up, color: Colors.white54),
+                    ]),
+                  ),
+                ),
+            ]),
+          ),
+        ),
       ),
-      ), // PopScope
     );
   }
 
@@ -367,8 +434,6 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
         Text("En attente du DJ...", style: TextStyle(color: Colors.grey[600], fontSize: 24)),
       ]));
     }
-
-    // File d'attente visible quand aucune chanson ne joue
     return Column(mainAxisAlignment: MainAxisAlignment.center, children: [
       Text("À venir", style: TextStyle(color: Colors.grey[600], fontSize: 18, letterSpacing: 3)),
       const SizedBox(height: 30),
@@ -382,16 +447,14 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
             color: isFirst ? const Color(0xFFE94560).withOpacity(0.15) : Colors.white.withOpacity(0.04),
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: isFirst ? const Color(0xFFE94560).withOpacity(0.5) : Colors.white12,
-            ),
+                color: isFirst ? const Color(0xFFE94560).withOpacity(0.5) : Colors.white12),
           ),
           child: Row(children: [
             Icon(isFirst ? Icons.play_arrow : Icons.queue_music,
                 color: isFirst ? const Color(0xFFE94560) : Colors.white38, size: 20),
             const SizedBox(width: 12),
             Expanded(child: Text(e.value['title'],
-                style: TextStyle(
-                    fontSize: isFirst ? 20 : 16,
+                style: TextStyle(fontSize: isFirst ? 20 : 16,
                     color: isFirst ? Colors.white : Colors.white54,
                     fontWeight: isFirst ? FontWeight.bold : FontWeight.normal),
                 maxLines: 1, overflow: TextOverflow.ellipsis)),

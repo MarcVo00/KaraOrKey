@@ -7,6 +7,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:sound_stream/sound_stream.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:app/config.dart';
 import 'package:app/models/lyric_line.dart';
 import 'package:app/widgets/youtube_search_dialog.dart';
@@ -22,7 +23,7 @@ class MicRemoteScreen extends StatefulWidget {
 class _MicRemoteScreenState extends State<MicRemoteScreen> {
   late IO.Socket socket;
 
-  // --- Audio local (monitor chanteur) ---
+  // --- Audio local ---
   late AudioPlayer _localPlayer;
   final RecorderStream _recorder = RecorderStream();
   final PlayerStream _micOutput = PlayerStream();
@@ -32,10 +33,10 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   bool _showVolumeBar = false;
 
   // --- Mode chanteur ---
-  // Quand false, ce téléphone n'est qu'un panneau de contrôle : pas de lecture locale
   bool _isSinging = true;
+  int _lastKnownTvPositionMs = 0;
 
-  // --- Paroles sync + progression ---
+  // --- Paroles + progression ---
   List<LyricLine> _lyrics = [];
   int _lyricIndex = -1;
   bool _isPaused = false;
@@ -43,6 +44,13 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   Duration _songDuration = Duration.zero;
   bool _isDragging = false;
   double _dragPosition = 0.0;
+
+  // --- Favoris ---
+  Set<String> _favorites = {};
+  bool _showFavoritesOnly = false;
+
+  // --- Historique session ---
+  final List<Map<String, dynamic>> _history = [];
 
   // --- État de la salle ---
   bool isReconnecting = false;
@@ -74,11 +82,80 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
         });
       }
     });
+    _loadFavorites();
     _initSocket();
     _initAudio();
     _fetchSongs();
     _localTitleController.addListener(() => setState(() {}));
     _localArtistController.addListener(() => setState(() {}));
+  }
+
+  // ==========================================
+  // FAVORIS
+  // ==========================================
+
+  Future<void> _loadFavorites() async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList('favorites') ?? [];
+    if (mounted) setState(() => _favorites = Set.from(list));
+  }
+
+  Future<void> _toggleFavorite(String songId) async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      if (_favorites.contains(songId)) {
+        _favorites.remove(songId);
+      } else {
+        _favorites.add(songId);
+      }
+    });
+    await prefs.setStringList('favorites', _favorites.toList());
+  }
+
+  // ==========================================
+  // HISTORIQUE
+  // ==========================================
+
+  void _addToHistory(Map<String, dynamic> song) {
+    if (_history.isEmpty || _history.first['id'] != song['id']) {
+      setState(() => _history.insert(0, Map.from(song)));
+    }
+  }
+
+  void _showHistorySheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF16213E),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => Column(children: [
+        const Padding(
+          padding: EdgeInsets.all(16),
+          child: Text("Chansons jouées",
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        ),
+        const Divider(color: Colors.white24, height: 1),
+        Expanded(
+          child: _history.isEmpty
+              ? const Center(child: Text("Aucune chanson jouée pour l'instant.",
+                  style: TextStyle(color: Colors.grey)))
+              : ListView.builder(
+                  itemCount: _history.length,
+                  itemBuilder: (ctx, i) => ListTile(
+                    leading: Icon(Icons.history,
+                        color: i == 0 ? Colors.pinkAccent : Colors.white38),
+                    title: Text(_history[i]['title'],
+                        style: TextStyle(
+                            color: i == 0 ? Colors.white : Colors.white70)),
+                    trailing: i == 0
+                        ? const Text("En cours",
+                            style: TextStyle(color: Colors.pinkAccent, fontSize: 12))
+                        : null,
+                  ),
+                ),
+        ),
+      ]),
+    );
   }
 
   // ==========================================
@@ -130,18 +207,20 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
         queue = List<Map<String, dynamic>>.from(data['queue']);
         _isPaused = data['paused'] ?? false;
       });
-      // Reprise automatique après reconnexion : une chanson joue côté serveur mais le
-      // player local est à l'arrêt (ex: redémarrage serveur + rejoindre la salle)
-      if (_isSinging &&
-          currentSong != null &&
-          prevSong == null &&
+      // Reprise après reconnexion : song en cours côté serveur, player local arrêté
+      if (_isSinging && currentSong != null && prevSong == null &&
           _localPlayer.processingState == ProcessingState.idle) {
-        _startLocalPlayback(currentSong!['id'], currentSong!['title']);
+        _startLocalPlayback(currentSong!['id'], currentSong!['title'],
+            seekMs: _lastKnownTvPositionMs);
       }
     });
 
     socket.on('start_song', (data) {
-      if (mounted) setState(() => _isPaused = false);
+      if (mounted) {
+        setState(() => _isPaused = false);
+        // Ajout à l'historique avant de changer currentSong
+        if (currentSong != null) _addToHistory(currentSong!);
+      }
       if (_isSinging) _startLocalPlayback(data['id'], data['title']);
     });
 
@@ -169,13 +248,13 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     });
 
     socket.on('position_sync', (data) async {
+      _lastKnownTvPositionMs = (data['position_ms'] as num?)?.toInt() ?? 0;
       if (!_isSinging) return;
-      final tvMs = (data['position_ms'] as num?)?.toInt() ?? 0;
       final myMs = _localPlayer.position.inMilliseconds;
-      if ((tvMs - myMs).abs() > 500 &&
+      if ((_lastKnownTvPositionMs - myMs).abs() > 500 &&
           _localPlayer.playing &&
           _localPlayer.processingState == ProcessingState.ready) {
-        await _localPlayer.seek(Duration(milliseconds: tvMs));
+        await _localPlayer.seek(Duration(milliseconds: _lastKnownTvPositionMs));
       }
     });
 
@@ -198,12 +277,13 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   // LECTURE LOCALE + PAROLES
   // ==========================================
 
-  Future<void> _startLocalPlayback(String songId, String title) async {
+  Future<void> _startLocalPlayback(String songId, String title, {int seekMs = 0}) async {
     if (mounted) setState(() { _lyrics = []; _lyricIndex = -1; });
     await _loadLyrics(songId);
     try {
       await _localPlayer.stop();
       await _localPlayer.setUrl('$baseUrl/api/play/$songId/audio');
+      if (seekMs > 0) await _localPlayer.seek(Duration(milliseconds: seekMs));
       await _localPlayer.setVolume(_musicVolume);
       _localPlayer.play();
     } catch (_) {}
@@ -236,12 +316,6 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     } catch (_) {}
   }
 
-  String _fmtDuration(Duration d) {
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    return '$m:$s';
-  }
-
   void _syncLyrics(Duration position) {
     if (_lyrics.isEmpty) return;
     for (int i = 0; i < _lyrics.length; i++) {
@@ -253,6 +327,12 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     }
   }
 
+  String _fmtDuration(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
   // ==========================================
   // MODE "JE CHANTE"
   // ==========================================
@@ -260,14 +340,14 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   void _toggleSinging() {
     setState(() => _isSinging = !_isSinging);
     if (_isSinging) {
-      // Activation : démarre le player si une chanson est en cours
       if (currentSong != null && !_isPaused) {
-        _startLocalPlayback(currentSong!['id'], currentSong!['title']);
+        // Démarre directement à la position connue de la TV → zéro gap
+        _startLocalPlayback(currentSong!['id'], currentSong!['title'],
+            seekMs: _lastKnownTvPositionMs);
       }
     } else {
-      // Désactivation : coupe le son local
       _localPlayer.stop();
-      setState(() { _lyrics = []; _lyricIndex = -1; });
+      setState(() { _lyrics = []; _lyricIndex = -1; _songPosition = Duration.zero; });
     }
   }
 
@@ -314,8 +394,7 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     }
   }
 
-  void _togglePause() =>
-      socket.emit(_isPaused ? 'command_resume' : 'command_pause');
+  void _togglePause() => socket.emit(_isPaused ? 'command_resume' : 'command_pause');
 
   void _stopSong() {
     showDialog(context: context, builder: (_) => AlertDialog(
@@ -367,6 +446,7 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                   body: jsonEncode({"song_id": song['id']}));
               if (res.statusCode == 200) {
                 _fetchSongs();
+                _favorites.remove(song['id']);
                 if (mounted) ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text("🗑️ ${song['title']} supprimée.")));
               } else {
@@ -405,6 +485,7 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     final t = _localTitleController.text.toLowerCase();
     final a = _localArtistController.text.toLowerCase();
     return allSongs.where((song) {
+      if (_showFavoritesOnly && !_favorites.contains(song['id'])) return false;
       final title = song['title'].toString().toLowerCase();
       final parts = title.split(' - ');
       final titlePart = parts.length > 1 ? parts.sublist(1).join(' - ') : title;
@@ -429,7 +510,7 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
           // Indicateur reconnexion
           if (isReconnecting)
             const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 12),
+              padding: EdgeInsets.symmetric(horizontal: 8),
               child: Row(children: [
                 SizedBox(width: 14, height: 14,
                     child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange)),
@@ -437,6 +518,16 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                 Text("Reconnexion...", style: TextStyle(fontSize: 12, color: Colors.orange)),
               ]),
             ),
+          // Historique
+          IconButton(
+            icon: Badge(
+              isLabelVisible: _history.isNotEmpty,
+              label: Text('${_history.length}', style: const TextStyle(fontSize: 10)),
+              child: const Icon(Icons.history),
+            ),
+            onPressed: _showHistorySheet,
+            tooltip: "Historique",
+          ),
           // Toggle "Je chante"
           Padding(
             padding: const EdgeInsets.only(right: 8),
@@ -446,13 +537,10 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                 duration: const Duration(milliseconds: 250),
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 decoration: BoxDecoration(
-                  color: _isSinging
-                      ? const Color(0xFFE94560).withOpacity(0.2)
-                      : Colors.transparent,
+                  color: _isSinging ? const Color(0xFFE94560).withOpacity(0.2) : Colors.transparent,
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                    color: _isSinging ? const Color(0xFFE94560) : Colors.white24,
-                  ),
+                      color: _isSinging ? const Color(0xFFE94560) : Colors.white24),
                 ),
                 child: Row(children: [
                   Icon(Icons.mic, size: 14,
@@ -475,7 +563,7 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
       ),
       body: Column(children: [
 
-        // --- Monitor paroles + seek (visible uniquement si "Je chante" et chanson active) ---
+        // --- Monitor paroles + seek ---
         if (currentSong != null && _isSinging)
           Container(
             width: double.infinity,
@@ -502,7 +590,6 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                       style: const TextStyle(fontSize: 15, color: Colors.white38)),
                 ),
               ],
-              // Barre de progression / seek
               if (_songDuration > Duration.zero) ...[
                 const SizedBox(height: 6),
                 SliderTheme(
@@ -550,7 +637,6 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           color: const Color(0xFF16213E),
           child: Row(children: [
-            // Bouton micro
             GestureDetector(
               onTap: _toggleMic,
               child: AnimatedContainer(
@@ -567,39 +653,22 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
               ),
             ),
             const SizedBox(width: 10),
-
-            // Titre en cours
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               const Text("EN COURS :", style: TextStyle(color: Colors.grey, fontSize: 11)),
               Text(currentSong != null ? currentSong!['title'] : "Rien ne joue",
                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                   maxLines: 1, overflow: TextOverflow.ellipsis),
             ])),
-
-            // Contrôles lecture
             if (currentSong != null) ...[
-              // Stop
+              IconButton(icon: const Icon(Icons.stop, size: 26, color: Colors.redAccent),
+                  onPressed: _stopSong, tooltip: "Arrêter"),
               IconButton(
-                icon: const Icon(Icons.stop, size: 26, color: Colors.redAccent),
-                onPressed: _stopSong,
-                tooltip: "Arrêter",
-              ),
-              // Pause / Reprise
-              IconButton(
-                icon: Icon(_isPaused ? Icons.play_arrow : Icons.pause,
-                    size: 28, color: _isPaused ? Colors.greenAccent : Colors.white70),
-                onPressed: _togglePause,
-                tooltip: _isPaused ? "Reprendre" : "Pause",
-              ),
-              // Suivant
-              IconButton(
-                icon: const Icon(Icons.skip_next, size: 28, color: Colors.white),
-                onPressed: _playNext,
-                tooltip: "Suivant",
-              ),
+                  icon: Icon(_isPaused ? Icons.play_arrow : Icons.pause,
+                      size: 28, color: _isPaused ? Colors.greenAccent : Colors.white70),
+                  onPressed: _togglePause, tooltip: _isPaused ? "Reprendre" : "Pause"),
+              IconButton(icon: const Icon(Icons.skip_next, size: 28, color: Colors.white),
+                  onPressed: _playNext, tooltip: "Suivant"),
             ],
-
-            // Volume musique
             IconButton(
               icon: Icon(Icons.music_note, size: 22,
                   color: _showVolumeBar ? Colors.pinkAccent : Colors.white54),
@@ -609,7 +678,7 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
           ]),
         ),
 
-        // --- Slider de volume musique ---
+        // --- Slider volume musique ---
         if (_showVolumeBar)
           Container(
             color: const Color(0xFF0D0D1A),
@@ -619,10 +688,7 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
               Expanded(child: Slider(
                 value: _musicVolume, min: 0, max: 1,
                 activeColor: const Color(0xFFE94560), inactiveColor: Colors.white24,
-                onChanged: (v) {
-                  setState(() => _musicVolume = v);
-                  _localPlayer.setVolume(v);
-                },
+                onChanged: (v) { setState(() => _musicVolume = v); _localPlayer.setVolume(v); },
               )),
               const Icon(Icons.volume_up, color: Colors.white38, size: 18),
               SizedBox(width: 36, child: Text("${(_musicVolume * 100).round()}%",
@@ -708,17 +774,39 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
 
         // --- Filtres ---
         Padding(
-          padding: const EdgeInsets.all(10.0),
+          padding: const EdgeInsets.fromLTRB(10, 10, 10, 4),
           child: Row(children: [
             Expanded(child: TextField(controller: _localTitleController,
                 decoration: const InputDecoration(labelText: "Titre",
                     prefixIcon: Icon(Icons.music_note, size: 20),
                     border: OutlineInputBorder(), contentPadding: EdgeInsets.all(10)))),
-            const SizedBox(width: 10),
+            const SizedBox(width: 8),
             Expanded(child: TextField(controller: _localArtistController,
                 decoration: const InputDecoration(labelText: "Artiste",
                     prefixIcon: Icon(Icons.person, size: 20),
                     border: OutlineInputBorder(), contentPadding: EdgeInsets.all(10)))),
+            const SizedBox(width: 8),
+            // Toggle favoris
+            GestureDetector(
+              onTap: () => setState(() => _showFavoritesOnly = !_showFavoritesOnly),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: _showFavoritesOnly
+                      ? Colors.amber.withOpacity(0.2)
+                      : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                      color: _showFavoritesOnly ? Colors.amber : Colors.white24),
+                ),
+                child: Icon(
+                  _showFavoritesOnly ? Icons.star : Icons.star_border,
+                  color: _showFavoritesOnly ? Colors.amber : Colors.white38,
+                  size: 22,
+                ),
+              ),
+            ),
           ]),
         ),
 
@@ -728,26 +816,36 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
               ? const Center(child: CircularProgressIndicator())
               : RefreshIndicator(
                   onRefresh: _fetchSongs, color: Colors.pink,
-                  child: ListView.builder(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    itemCount: filteredSongs.length,
-                    itemBuilder: (ctx, i) {
-                      final song = filteredSongs[i];
-                      return ListTile(
-                        leading: const Icon(Icons.music_note, color: Colors.pink),
-                        title: Text(song['title']),
-                        subtitle: Text(song['has_lyrics'] ? "Paroles OK" : "Instru seul"),
-                        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                          IconButton(
-                              icon: const Icon(Icons.add_circle, size: 30, color: Colors.greenAccent),
-                              onPressed: () => _handleSongTap(song)),
-                          IconButton(
-                              icon: const Icon(Icons.delete_outline, size: 26, color: Colors.redAccent),
-                              onPressed: () => _confirmDeleteSong(song)),
-                        ]),
-                      );
-                    },
-                  ),
+                  child: filteredSongs.isEmpty
+                      ? Center(child: Text(
+                          _showFavoritesOnly ? "Aucun favori." : "Aucune chanson.",
+                          style: const TextStyle(color: Colors.grey)))
+                      : ListView.builder(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          itemCount: filteredSongs.length,
+                          itemBuilder: (ctx, i) {
+                            final song = filteredSongs[i];
+                            final isFav = _favorites.contains(song['id']);
+                            return ListTile(
+                              leading: const Icon(Icons.music_note, color: Colors.pink),
+                              title: Text(song['title']),
+                              subtitle: Text(song['has_lyrics'] ? "Paroles OK" : "Instru seul"),
+                              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                                IconButton(
+                                    icon: Icon(isFav ? Icons.star : Icons.star_border,
+                                        size: 24,
+                                        color: isFav ? Colors.amber : Colors.white38),
+                                    onPressed: () => _toggleFavorite(song['id'])),
+                                IconButton(
+                                    icon: const Icon(Icons.add_circle, size: 28, color: Colors.greenAccent),
+                                    onPressed: () => _handleSongTap(song)),
+                                IconButton(
+                                    icon: const Icon(Icons.delete_outline, size: 24, color: Colors.redAccent),
+                                    onPressed: () => _confirmDeleteSong(song)),
+                              ]),
+                            );
+                          },
+                        ),
                 ),
         ),
       ]),
