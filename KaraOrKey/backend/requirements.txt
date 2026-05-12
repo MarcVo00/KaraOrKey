@@ -5,3 +5,4 @@ eventlet
 yt-dlp
 demucs
 unidecode
+soundfile
