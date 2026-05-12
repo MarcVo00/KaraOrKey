@@ -33,8 +33,8 @@ def sanitize_filename(name):
 
 def clean_title(title):
     if not title: return ""
-    # 1. On enlève les parenthèses et crochets
-    title = re.sub(r'\(.*?\)|\[.*?\]', '', title)
+    # 1. On enlève les parenthèses, crochets et guillemets CJK (ex: 「Audio」)
+    title = re.sub(r'\(.*?\)|\[.*?\]|「.*?」|『.*?』|【.*?】|〔.*?〕|《.*?》|〈.*?〉', '', title)
     
     # 2. On coupe tout ce qui se trouve après un "ft.", "feat", ou "|"
     # Ex: "W/n - id 072019 | 3107 ft 267" devient "W/n - id 072019 "
