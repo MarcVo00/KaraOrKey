@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
@@ -11,6 +12,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:app/config.dart';
 import 'package:app/models/lyric_line.dart';
 import 'package:app/widgets/youtube_search_dialog.dart';
+import 'package:app/services/web_mic_stub.dart'
+    if (dart.library.html) 'package:app/services/web_mic.dart';
 
 class MicRemoteScreen extends StatefulWidget {
   final String roomName;
@@ -404,13 +407,24 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
 
   Future<void> _toggleMic() async {
     if (isMicOn) {
-      _micSubscription?.cancel(); await _recorder.stop();
+      if (kIsWeb) {
+        WebMic.stop();
+      } else {
+        _micSubscription?.cancel();
+        await _recorder.stop();
+      }
       setState(() => isMicOn = false);
     } else {
-      if (await Permission.microphone.request().isGranted) {
-        await _micOutput.start(); await _recorder.start();
-        _micSubscription = _recorder.audioStream.listen((d) => _micOutput.writeChunk(d));
-        setState(() => isMicOn = true);
+      if (kIsWeb) {
+        final ok = await WebMic.start();
+        if (ok) setState(() => isMicOn = true);
+      } else {
+        if (await Permission.microphone.request().isGranted) {
+          await _micOutput.start();
+          await _recorder.start();
+          _micSubscription = _recorder.audioStream.listen((d) => _micOutput.writeChunk(d));
+          setState(() => isMicOn = true);
+        }
       }
     }
   }
