@@ -28,7 +28,7 @@ start "KaraorKey - Moteur Backend" cmd /k "call venv\Scripts\activate.bat && pyt
 
 cd ../web
 echo [3/3] Demarrage de l'application Web sur le port 8080...
-start "KaraorKey - Application Web" cmd /k "python -m http.server 8080"
+start "KaraorKey - Application Web" cmd /k "python serve.py"
 
 echo.
 echo ===================================================
