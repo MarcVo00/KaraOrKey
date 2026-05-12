@@ -35,10 +35,14 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   // Quand false, ce téléphone n'est qu'un panneau de contrôle : pas de lecture locale
   bool _isSinging = true;
 
-  // --- Paroles sync ---
+  // --- Paroles sync + progression ---
   List<LyricLine> _lyrics = [];
   int _lyricIndex = -1;
   bool _isPaused = false;
+  Duration _songPosition = Duration.zero;
+  Duration _songDuration = Duration.zero;
+  bool _isDragging = false;
+  double _dragPosition = 0.0;
 
   // --- État de la salle ---
   bool isReconnecting = false;
@@ -56,10 +60,18 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     super.initState();
     WakelockPlus.enable();
     _localPlayer = AudioPlayer();
-    _localPlayer.positionStream.listen((pos) { if (mounted) _syncLyrics(pos); });
+    _localPlayer.positionStream.listen((pos) {
+      if (mounted && !_isDragging) { setState(() => _songPosition = pos); _syncLyrics(pos); }
+    });
+    _localPlayer.durationStream.listen((d) {
+      if (mounted && d != null) setState(() => _songDuration = d);
+    });
     _localPlayer.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed && mounted) {
-        setState(() { _lyrics = []; _lyricIndex = -1; _isPaused = false; });
+        setState(() {
+          _lyrics = []; _lyricIndex = -1; _isPaused = false;
+          _songPosition = Duration.zero; _songDuration = Duration.zero;
+        });
       }
     });
     _initSocket();
@@ -135,7 +147,10 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
 
     socket.on('stop_song', (_) {
       _localPlayer.stop();
-      if (mounted) setState(() { _lyrics = []; _lyricIndex = -1; _isPaused = false; });
+      if (mounted) setState(() {
+        _lyrics = []; _lyricIndex = -1; _isPaused = false;
+        _songPosition = Duration.zero; _songDuration = Duration.zero;
+      });
     });
 
     socket.on('pause_song', (_) {
@@ -146,6 +161,11 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     socket.on('resume_song', (_) {
       _localPlayer.play();
       if (mounted) setState(() => _isPaused = false);
+    });
+
+    socket.on('seek_to', (data) async {
+      final ms = (data['position_ms'] as num?)?.toInt() ?? 0;
+      if (_isSinging) await _localPlayer.seek(Duration(milliseconds: ms));
     });
 
     socket.on('position_sync', (data) async {
@@ -214,6 +234,12 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
         if (mounted) setState(() => _lyrics = parsed);
       }
     } catch (_) {}
+  }
+
+  String _fmtDuration(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
   }
 
   void _syncLyrics(Duration position) {
@@ -449,12 +475,12 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
       ),
       body: Column(children: [
 
-        // --- Monitor paroles (visible uniquement si "Je chante" et chanson active) ---
+        // --- Monitor paroles + seek (visible uniquement si "Je chante" et chanson active) ---
         if (currentSong != null && _isSinging)
           Container(
             width: double.infinity,
             color: const Color(0xFF0D0D1A),
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            padding: const EdgeInsets.fromLTRB(20, 10, 20, 4),
             child: Column(children: [
               AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
@@ -474,6 +500,46 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                   child: Text(nextLine, key: ValueKey<String>('dj_nxt_$nextLine'),
                       textAlign: TextAlign.center,
                       style: const TextStyle(fontSize: 15, color: Colors.white38)),
+                ),
+              ],
+              // Barre de progression / seek
+              if (_songDuration > Duration.zero) ...[
+                const SizedBox(height: 6),
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 2,
+                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+                    activeTrackColor: _isPaused ? Colors.white24 : const Color(0xFFE94560),
+                    inactiveTrackColor: Colors.white10,
+                    thumbColor: _isPaused ? Colors.white24 : const Color(0xFFE94560),
+                    overlayColor: const Color(0xFFE94560).withOpacity(0.15),
+                  ),
+                  child: Slider(
+                    value: _isDragging ? _dragPosition
+                        : (_songDuration.inMilliseconds > 0
+                            ? (_songPosition.inMilliseconds / _songDuration.inMilliseconds).clamp(0.0, 1.0)
+                            : 0.0),
+                    min: 0, max: 1,
+                    onChangeStart: (v) => setState(() { _isDragging = true; _dragPosition = v; }),
+                    onChanged: (v) => setState(() => _dragPosition = v),
+                    onChangeEnd: (v) {
+                      setState(() => _isDragging = false);
+                      final ms = (v * _songDuration.inMilliseconds).round();
+                      socket.emit('command_seek', {'position_ms': ms});
+                    },
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                    Text(_fmtDuration(_isDragging
+                            ? Duration(milliseconds: (_dragPosition * _songDuration.inMilliseconds).round())
+                            : _songPosition),
+                        style: const TextStyle(color: Colors.white24, fontSize: 11)),
+                    Text(_fmtDuration(_songDuration),
+                        style: const TextStyle(color: Colors.white24, fontSize: 11)),
+                  ]),
                 ),
               ],
             ]),

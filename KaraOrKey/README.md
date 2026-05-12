@@ -6,11 +6,13 @@ Application karaoké réseau en temps réel. Une TV affiche les paroles et joue 
 
 - **Séparation de stems par IA** — télécharge depuis YouTube via `yt-dlp` et utilise [Demucs](https://github.com/facebookresearch/demucs) pour isoler les voix et produire une piste instrumentale propre
 - **Paroles synchronisées** — récupérées via l'API [LRCLIB](https://lrclib.net), avec romanisation phonétique pour les scripts non-latins (K-Pop, japonais, etc.)
-- **Monitor chanteur** — le téléphone DJ joue la piste d'accompagnement localement en même temps que la TV ; le chanteur entend la musique + sa propre voix sans aucune latence réseau
-- **Multi-salles** — créez des salles publiques ou protégées par mot de passe ; une TV par salle, DJ illimités
-- **Sync temps réel** — file d'attente, état de lecture et paroles partagés via WebSocket (Socket.IO)
-- **Gestion de la bibliothèque** — ajout, suppression de chansons ; persistance des salles entre redémarrages
-- **Cross-platform** — interface Flutter compilée en WebAssembly, accessible depuis n'importe quel navigateur
+- **Monitor chanteur** — le téléphone DJ joue la piste d'accompagnement localement avec les paroles en temps réel ; latence zéro, pas de streaming réseau
+- **Mode "Je chante"** — chaque DJ choisit s'il est le chanteur actif (lecture locale + paroles) ou simplement opérateur de queue (sans audio)
+- **Contrôle complet** — lecture, pause, reprise, stop, chanson suivante, déplacement dans la piste (seek)
+- **Multi-salles** — salles publiques ou protégées par mot de passe, persistées entre redémarrages ; une TV par salle, DJ illimités
+- **Sync temps réel** — queue, état de lecture et paroles partagés via WebSocket (Socket.IO) avec reconnexion automatique
+- **Correction de drift** — la TV émet sa position toutes les 5 s ; les téléphones DJ se resynchronisent automatiquement si l'écart dépasse 500 ms
+- **Bibliothèque** — triée alphabétiquement, avec ajout et suppression de chansons
 
 ## Stack technique
 
@@ -46,7 +48,6 @@ Application karaoké réseau en temps réel. Une TV affiche les paroles et joue 
    ```bash
    cd app
    flutter build web --wasm
-   # Puis copier le résultat dans KaraOrKey/web/
    xcopy /E /Y build\web\* ..\KaraOrKey\web\
    ```
 
@@ -58,16 +59,12 @@ Application karaoké réseau en temps réel. Une TV affiche les paroles et joue 
    start.bat
    ```
 
-   Au premier lancement, le script :
-   - Crée un environnement virtuel Python dans `backend/venv/`
-   - Installe toutes les dépendances Python
-   - Démarre le serveur backend sur `http://localhost:5000`
-   - Démarre l'interface web sur `http://localhost:8080`
+   Le script crée l'environnement Python, installe les dépendances, démarre les deux serveurs et **affiche l'adresse IP locale** à utiliser sur les téléphones.
 
 5. **Connecter les appareils**
 
    - Ouvrir `http://localhost:8080` sur la TV / l'écran principal
-   - Sur les téléphones, ouvrir l'application Flutter et entrer l'IP locale du PC (ex: `192.168.1.45`)
+   - Sur les téléphones, lancer l'app Flutter et entrer l'IP affichée par `start.bat`
 
 ## Comment ça marche
 
@@ -85,18 +82,24 @@ URL YouTube
           lyrics.lrc          (paroles horodatées)
 ```
 
-La séparation est intensive en CPU et prend typiquement 1 à 3 minutes par chanson.
+La séparation prend typiquement 1 à 3 minutes par chanson.
 
 ### Architecture monitor chanteur
 
 ```
-Téléphone DJ ──► backing track (local, 0 ms de latence)
-              ──► micro       (local, 0 ms de latence)
-              ──► commandes WebSocket ──► Serveur Flask-SocketIO ──► TV
-                                                                    (backing track + paroles)
+Téléphone DJ ──► backing track (local, 0 ms latence) + paroles sync
+              ──► micro        (local, 0 ms latence)
+              ──► commandes WebSocket ──► Serveur ──► TV (backing track + paroles + queue)
 ```
 
-Le téléphone du DJ joue la musique et les paroles en local — le chanteur a son propre retour scène. La TV diffuse la même piste pour le public et affiche les paroles en grand.
+Le téléphone joue la musique et affiche les paroles en local — le chanteur a son propre retour. La TV diffuse la même piste pour le public.
+
+### Correction de drift
+
+```
+TV ──► position_sync (toutes les 5s) ──► Serveur ──► DJ phones
+                                                        └── |drift| > 500ms ? seek()
+```
 
 ### Architecture multi-salles
 
@@ -106,6 +109,31 @@ Téléphone DJ  ──┼──► Serveur Flask-SocketIO ──► TV (Écran)
 Téléphone DJ  ──┘        (localhost:5000)
 ```
 
+## Utilisation
+
+### Panneau DJ
+
+| Action | Geste |
+|--------|-------|
+| Lancer une chanson | Appuyer sur ✚ dans la liste |
+| Mettre en file d'attente | Appuyer sur ✚ quand une chanson joue déjà |
+| Réordonner la queue | Maintenir appuyé puis glisser |
+| Pause / Reprise | Bouton ⏸ / ▶ dans la barre de statut |
+| Arrêter | Bouton ⏹ (confirmation demandée) |
+| Chanson suivante | Bouton ⏭ |
+| Se déplacer dans la piste | Glisser la barre de progression |
+| Activer le micro | Appuyer sur le bouton micro |
+| Volume musique | Icône 🎵 → slider |
+| Mode "Je chante" | Toggle dans l'AppBar |
+
+### Écran TV
+
+| Action | Geste |
+|--------|-------|
+| Régler le volume | Appuyer sur l'écran → slider |
+| Se déplacer dans la piste | Glisser la barre de progression |
+| Quitter la salle | Bouton retour → confirmation |
+
 ## API
 
 | Méthode | Endpoint | Description |
@@ -113,7 +141,7 @@ Téléphone DJ  ──┘        (localhost:5000)
 | GET | `/api/rooms` | Liste des salles |
 | POST | `/api/create_room` | Créer une salle (mot de passe optionnel) |
 | POST | `/api/delete_room` | Supprimer une salle |
-| GET | `/api/songs` | Liste des chansons traitées |
+| GET | `/api/songs` | Liste des chansons (triée alphabétiquement) |
 | GET | `/api/search?q=` | Recherche YouTube |
 | POST | `/api/add_youtube` | Ajouter une URL YouTube à la file de traitement |
 | POST | `/api/cancel` | Annuler un téléchargement en cours |
@@ -122,21 +150,28 @@ Téléphone DJ  ──┘        (localhost:5000)
 
 ### Événements WebSocket
 
-| Événement | Description |
-|-----------|-------------|
-| `join_karaoke_room` | Rejoindre une salle (TV ou DJ) |
-| `command_play` / `command_stop` | Contrôler la lecture |
-| `start_song` / `stop_song` | Déclenché vers tous les clients de la salle |
-| `add_to_queue` / `remove_from_queue` / `reorder_queue` | Gérer la file |
-| `play_next` | Passer au titre suivant |
-| `sync_state` | Diffuse l'état complet de la salle |
-| `rooms_updated` | Notifie les clients d'un changement de liste de salles |
+| Événement | Direction | Description |
+|-----------|-----------|-------------|
+| `join_karaoke_room` | Client → Serveur | Rejoindre une salle (TV ou DJ) |
+| `command_play` | DJ → Serveur | Lancer une chanson |
+| `command_stop` | DJ → Serveur | Arrêter la lecture |
+| `command_pause` | DJ → Serveur | Mettre en pause |
+| `command_resume` | DJ → Serveur | Reprendre |
+| `command_seek` | DJ/TV → Serveur | Se déplacer dans la piste |
+| `play_next` | DJ/TV → Serveur | Passer au titre suivant |
+| `add_to_queue` / `remove_from_queue` / `reorder_queue` | DJ → Serveur | Gérer la file |
+| `start_song` / `stop_song` | Serveur → Salle | Déclenché vers tous les clients |
+| `pause_song` / `resume_song` | Serveur → Salle | Pause / reprise vers tous |
+| `seek_to` | Serveur → Salle | Position cible vers tous |
+| `sync_state` | Serveur → Client | État complet de la salle |
+| `position_sync` | TV → Serveur → DJs | Position TV pour correction drift |
+| `rooms_updated` | Serveur → Tous | Changement de liste de salles |
 
 ## Structure du projet
 
 ```
 KaraOrKey/
-├── start.bat                   # Lanceur Windows
+├── start.bat                   # Lanceur Windows (affiche l'IP locale)
 ├── backend/
 │   ├── server.py               # Serveur Flask + Socket.IO
 │   ├── factory.py              # Pipeline de traitement des chansons
@@ -145,24 +180,22 @@ KaraOrKey/
 │   ├── songs/                  # Bibliothèque de chansons (gitignored)
 │   └── temp/                   # Fichiers temporaires (gitignored)
 └── web/                        # Build Flutter WebAssembly (static)
-    ├── index.html
-    ├── main.dart.js / *.wasm   # Générés par flutter build web (gitignored)
-    └── ...
+    └── ...                     # Généré par flutter build web (partiellement gitignored)
 
 app/                            # Sources Flutter
 ├── lib/
-│   ├── main.dart               # Point d'entrée de l'application
-│   ├── config.dart             # URL du serveur (variable globale)
+│   ├── main.dart               # Point d'entrée
+│   ├── config.dart             # URL du serveur
 │   ├── models/
-│   │   └── lyric_line.dart     # Modèle d'une ligne de paroles
+│   │   └── lyric_line.dart
 │   ├── screens/
-│   │   ├── server_setup_screen.dart    # Connexion au serveur
-│   │   ├── role_selection_screen.dart  # Choix DJ / TV
-│   │   ├── room_selection_screen.dart  # Liste et gestion des salles
-│   │   ├── mic_remote_screen.dart      # Panneau DJ + monitor chanteur
-│   │   └── tv_player_screen.dart       # Écran TV (paroles + progression)
+│   │   ├── server_setup_screen.dart
+│   │   ├── role_selection_screen.dart
+│   │   ├── room_selection_screen.dart
+│   │   ├── mic_remote_screen.dart      # Panneau DJ
+│   │   └── tv_player_screen.dart       # Écran TV
 │   └── widgets/
-│       └── youtube_search_dialog.dart  # Recherche et ajout YouTube
+│       └── youtube_search_dialog.dart
 └── pubspec.yaml
 ```
 

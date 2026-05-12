@@ -281,6 +281,13 @@ def handle_resume_command():
         emit('resume_song', to=room)
         emit('sync_state', rooms_state[room], to=room)
 
+@socketio.on('command_seek')
+def handle_seek(data):
+    if request.sid not in clients: return
+    room = clients[request.sid]['room']
+    if room in rooms_state and rooms_state[room]['current_song']:
+        emit('seek_to', {'position_ms': int(data.get('position_ms', 0))}, to=room)
+
 @socketio.on('play_next')
 def handle_play_next():
     if request.sid not in clients: return

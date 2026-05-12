@@ -30,6 +30,8 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
   bool _isPaused = false;
   bool isReconnecting = false;
   List<dynamic> _queue = [];
+  bool _isDragging = false;
+  double _dragPosition = 0.0;
 
   Timer? _syncTimer;
 
@@ -50,7 +52,7 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
       if (mounted && d != null) setState(() => _duration = d);
     });
     _tvPlayer.positionStream.listen((p) {
-      if (mounted) { setState(() => _position = p); _syncLyrics(p); }
+      if (mounted && !_isDragging) { setState(() => _position = p); _syncLyrics(p); }
     });
 
     // Émet la position toutes les 5s pour permettre la correction de drift côté DJ
@@ -123,6 +125,11 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
     socket.on('resume_song', (_) {
       _tvPlayer.play();
       if (mounted) setState(() => _isPaused = false);
+    });
+
+    socket.on('seek_to', (data) {
+      final ms = (data['position_ms'] as num?)?.toInt() ?? 0;
+      _tvPlayer.seek(Duration(milliseconds: ms));
     });
   }
 
@@ -197,6 +204,7 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
         ? lyrics[currentLyricIndex + 1].text : "";
     final progress = _duration.inMilliseconds > 0
         ? (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0) : 0.0;
+    final displayProgress = _isDragging ? _dragPosition : progress;
 
     return PopScope(
       canPop: false,
@@ -247,19 +255,43 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
               ]),
             ),
 
-            // --- Barre de progression ---
+            // --- Barre de progression (seek) ---
             if (_duration > Duration.zero)
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 40.0),
+                padding: const EdgeInsets.symmetric(horizontal: 28.0),
                 child: Column(children: [
-                  LinearProgressIndicator(
-                      value: progress, backgroundColor: Colors.white12,
-                      color: _isPaused ? Colors.white38 : const Color(0xFFE94560), minHeight: 4),
-                  const SizedBox(height: 4),
-                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                    Text(_fmt(_position), style: const TextStyle(color: Colors.white38, fontSize: 12)),
-                    Text(_fmt(_duration), style: const TextStyle(color: Colors.white38, fontSize: 12)),
-                  ]),
+                  SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      trackHeight: 4,
+                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                      overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+                      activeTrackColor: _isPaused ? Colors.white38 : const Color(0xFFE94560),
+                      inactiveTrackColor: Colors.white12,
+                      thumbColor: _isPaused ? Colors.white38 : const Color(0xFFE94560),
+                      overlayColor: const Color(0xFFE94560).withOpacity(0.2),
+                    ),
+                    child: Slider(
+                      value: displayProgress,
+                      min: 0, max: 1,
+                      onChangeStart: (v) => setState(() { _isDragging = true; _dragPosition = v; }),
+                      onChanged: (v) => setState(() => _dragPosition = v),
+                      onChangeEnd: (v) {
+                        setState(() => _isDragging = false);
+                        final ms = (v * _duration.inMilliseconds).round();
+                        socket.emit('command_seek', {'position_ms': ms});
+                      },
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12.0),
+                    child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                      Text(_fmt(_isDragging
+                              ? Duration(milliseconds: (_dragPosition * _duration.inMilliseconds).round())
+                              : _position),
+                          style: const TextStyle(color: Colors.white38, fontSize: 12)),
+                      Text(_fmt(_duration), style: const TextStyle(color: Colors.white38, fontSize: 12)),
+                    ]),
+                  ),
                 ]),
               ),
             const SizedBox(height: 12),
