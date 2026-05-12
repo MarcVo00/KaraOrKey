@@ -164,26 +164,27 @@ def run_factory(youtube_url, task_id=None):
     cmd = ["demucs", "--two-stems=vocals", "-n", "htdemucs", "-o", TEMP_DIR, temp_audio_path]
     demucs_output_folder = os.path.join(TEMP_DIR, "htdemucs", video_id)
 
-    process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if task_id:
         active_processes[task_id] = process
 
     try:
         process.wait()
     finally:
-        # Nettoyage garanti même si le process est tué ou lève une exception
         if task_id in active_processes:
             del active_processes[task_id]
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
-        # Dossier de sortie Demucs (contient les stems intermédiaires)
         if os.path.isdir(demucs_output_folder) and process.returncode != 0:
             import shutil as _shutil
             _shutil.rmtree(demucs_output_folder, ignore_errors=True)
 
     if process.returncode != 0:
-        logging.warning("Demucs interrompu (annulation ou erreur).")
-        raise Exception("Demucs a été annulé par l'utilisateur.")
+        # Lire stderr pour diagnostiquer (annulation user vs vraie erreur)
+        stderr_out = process.stderr.read().decode('utf-8', errors='replace').strip()
+        if task_id not in active_processes and stderr_out:
+            logging.error(f"Demucs a échoué (code {process.returncode}):\n{stderr_out[-1000:]}")
+        raise Exception("Demucs a échoué — voir logs pour détails.")
 
     accompaniment_src = os.path.join(demucs_output_folder, "no_vocals.wav")
     if os.path.exists(accompaniment_src):
