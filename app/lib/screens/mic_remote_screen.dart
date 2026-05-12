@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:socket_io_client/socket_io_client.dart' as IO;
+import 'package:just_audio/just_audio.dart';
 import 'package:sound_stream/sound_stream.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'dart:async';
 import 'package:app/config.dart';
+import 'package:app/models/lyric_line.dart';
 import 'package:app/widgets/youtube_search_dialog.dart';
 
 class MicRemoteScreen extends StatefulWidget {
@@ -19,16 +21,27 @@ class MicRemoteScreen extends StatefulWidget {
 
 class _MicRemoteScreenState extends State<MicRemoteScreen> {
   late IO.Socket socket;
+
+  // --- Audio local (monitor chanteur) ---
+  late AudioPlayer _localPlayer;
   final RecorderStream _recorder = RecorderStream();
   final PlayerStream _micOutput = PlayerStream();
   bool isMicOn = false;
-  bool isReconnecting = false;
   StreamSubscription? _micSubscription;
+
+  // --- Paroles sync ---
+  List<LyricLine> _lyrics = [];
+  int _lyricIndex = -1;
+
+  // --- État de la salle ---
+  bool isReconnecting = false;
   List<dynamic> allSongs = [];
   List<dynamic> activeDownloads = [];
   bool isLoading = true;
   Map<String, dynamic>? currentSong;
   List<Map<String, dynamic>> queue = [];
+
+  // --- Filtres bibliothèque ---
   final TextEditingController _localTitleController = TextEditingController();
   final TextEditingController _localArtistController = TextEditingController();
 
@@ -36,12 +49,25 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   void initState() {
     super.initState();
     WakelockPlus.enable();
+    _localPlayer = AudioPlayer();
+    _localPlayer.positionStream.listen((pos) {
+      if (mounted) _syncLyrics(pos);
+    });
+    _localPlayer.playerStateStream.listen((state) {
+      if (state.processingState == ProcessingState.completed && mounted) {
+        setState(() { _lyrics = []; _lyricIndex = -1; });
+      }
+    });
     _initSocket();
     _initAudio();
     _fetchSongs();
     _localTitleController.addListener(() => setState(() {}));
     _localArtistController.addListener(() => setState(() {}));
   }
+
+  // ==========================================
+  // SOCKET
+  // ==========================================
 
   void _joinRoom() {
     socket.emit('join_karaoke_room', {
@@ -89,6 +115,16 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
       }
     });
 
+    // Le DJ reçoit start_song comme la TV → démarre le monitor local
+    socket.on('start_song', (data) {
+      _startLocalPlayback(data['id'], data['title']);
+    });
+
+    socket.on('stop_song', (_) {
+      _localPlayer.stop();
+      if (mounted) setState(() { _lyrics = []; _lyricIndex = -1; });
+    });
+
     socket.on('sync_state', (data) {
       if (mounted) setState(() {
         currentSong = data['current_song'];
@@ -113,19 +149,71 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     });
   }
 
-  Future<void> _initAudio() async {
-    try { await _recorder.initialize(); await _micOutput.initialize(); } catch (_) {}
+  // ==========================================
+  // LECTURE LOCALE + PAROLES
+  // ==========================================
+
+  Future<void> _startLocalPlayback(String songId, String title) async {
+    if (mounted) setState(() { _lyrics = []; _lyricIndex = -1; });
+    await _loadLyrics(songId);
+    try {
+      await _localPlayer.stop();
+      await _localPlayer.setUrl('$baseUrl/api/play/$songId/audio');
+      await _localPlayer.setVolume(1.0);
+      _localPlayer.play();
+    } catch (_) {}
   }
 
-  Future<void> _fetchSongs() async {
-    if (!mounted) return;
+  Future<void> _loadLyrics(String songId) async {
     try {
-      final response = await http.get(Uri.parse('$baseUrl/api/songs'))
-          .timeout(const Duration(seconds: 5));
-      if (response.statusCode == 200 && mounted) {
-        setState(() { allSongs = json.decode(response.body); isLoading = false; });
+      final response = await http.get(Uri.parse('$baseUrl/api/play/$songId/lyrics'));
+      if (response.statusCode == 200) {
+        final lines = utf8.decode(response.bodyBytes).split('\n');
+        final parsed = <LyricLine>[];
+        final re = RegExp(r"^\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)");
+        for (final line in lines) {
+          final m = re.firstMatch(line);
+          if (m != null) {
+            final text = m.group(4)!.trim();
+            if (text.isNotEmpty) {
+              final sub = m.group(3)!;
+              final ms = sub.length == 2 ? int.parse(sub) * 10 : int.parse(sub);
+              parsed.add(LyricLine(
+                timestamp: Duration(
+                  minutes: int.parse(m.group(1)!),
+                  seconds: int.parse(m.group(2)!),
+                  milliseconds: ms,
+                ),
+                text: text,
+              ));
+            }
+          }
+        }
+        if (mounted) setState(() => _lyrics = parsed);
       }
-    } catch (e) { if (mounted) setState(() => isLoading = false); }
+    } catch (_) {}
+  }
+
+  void _syncLyrics(Duration position) {
+    if (_lyrics.isEmpty) return;
+    for (int i = 0; i < _lyrics.length; i++) {
+      final isLast = i == _lyrics.length - 1;
+      final isCurrent = isLast
+          ? position >= _lyrics[i].timestamp
+          : position >= _lyrics[i].timestamp && position < _lyrics[i + 1].timestamp;
+      if (isCurrent) {
+        if (_lyricIndex != i) setState(() => _lyricIndex = i);
+        break;
+      }
+    }
+  }
+
+  // ==========================================
+  // MICRO
+  // ==========================================
+
+  Future<void> _initAudio() async {
+    try { await _recorder.initialize(); await _micOutput.initialize(); } catch (_) {}
   }
 
   Future<void> _toggleMic() async {
@@ -143,12 +231,28 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     }
   }
 
+  // ==========================================
+  // CONTRÔLES DJ
+  // ==========================================
+
+  Future<void> _fetchSongs() async {
+    if (!mounted) return;
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/api/songs'))
+          .timeout(const Duration(seconds: 5));
+      if (response.statusCode == 200 && mounted) {
+        setState(() { allSongs = json.decode(response.body); isLoading = false; });
+      }
+    } catch (e) { if (mounted) setState(() => isLoading = false); }
+  }
+
   void _handleSongTap(dynamic song) {
     if (currentSong == null) {
       socket.emit('command_play', song);
     } else {
       socket.emit('add_to_queue', song);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("🎵 Ajouté : ${song['title']}")));
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("🎵 Ajouté : ${song['title']}")));
     }
   }
 
@@ -193,11 +297,13 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                     SnackBar(content: Text("🗑️ ${song['title']} supprimée.")));
               } else {
                 if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("Erreur lors de la suppression."), backgroundColor: Colors.red));
+                    const SnackBar(content: Text("Erreur lors de la suppression."),
+                        backgroundColor: Colors.red));
               }
             } catch (_) {
               if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text("Impossible de joindre le serveur."), backgroundColor: Colors.red));
+                  const SnackBar(content: Text("Impossible de joindre le serveur."),
+                      backgroundColor: Colors.red));
             }
           },
           child: const Text("Supprimer", style: TextStyle(color: Colors.white)),
@@ -206,9 +312,14 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     ));
   }
 
+  // ==========================================
+  // DISPOSE & FILTRES
+  // ==========================================
+
   @override
   void dispose() {
     socket.dispose();
+    _localPlayer.dispose();
     _micSubscription?.cancel();
     _recorder.stop();
     _micOutput.stop();
@@ -230,8 +341,16 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     }).toList();
   }
 
+  // ==========================================
+  // BUILD
+  // ==========================================
+
   @override
   Widget build(BuildContext context) {
+    final currentLine = (_lyrics.isNotEmpty && _lyricIndex >= 0) ? _lyrics[_lyricIndex].text : "";
+    final nextLine = (_lyrics.isNotEmpty && _lyricIndex >= 0 && _lyricIndex + 1 < _lyrics.length)
+        ? _lyrics[_lyricIndex + 1].text : "";
+
     return Scaffold(
       appBar: AppBar(
         title: Text("DJ - ${widget.roomName}"),
@@ -256,6 +375,42 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
       ),
       body: Column(
         children: [
+
+          // --- Monitor paroles (visible uniquement quand une chanson joue) ---
+          if (currentSong != null)
+            Container(
+              width: double.infinity,
+              color: const Color(0xFF0D0D1A),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              child: Column(children: [
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 300),
+                  child: Text(
+                    currentLine.isEmpty ? "♪" : currentLine,
+                    key: ValueKey<String>('dj_current_$currentLine'),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: currentLine.isEmpty ? Colors.white12 : const Color(0xFFE94560),
+                    ),
+                  ),
+                ),
+                if (nextLine.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 300),
+                    child: Text(
+                      nextLine,
+                      key: ValueKey<String>('dj_next_$nextLine'),
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 15, color: Colors.white38),
+                    ),
+                  ),
+                ],
+              ]),
+            ),
+
           // --- Barre statut lecture + micro ---
           Container(
             padding: const EdgeInsets.all(15),
@@ -315,7 +470,9 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                         child: Container(
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(10),
-                            boxShadow: [BoxShadow(color: Colors.pinkAccent.withOpacity(0.6), blurRadius: 15, spreadRadius: 2)],
+                            boxShadow: [BoxShadow(
+                                color: Colors.pinkAccent.withOpacity(0.6),
+                                blurRadius: 15, spreadRadius: 2)],
                           ),
                           child: child,
                         ),
@@ -357,8 +514,7 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                                 child: Container(
                                   padding: const EdgeInsets.all(4),
                                   decoration: BoxDecoration(
-                                    color: Colors.redAccent,
-                                    shape: BoxShape.circle,
+                                    color: Colors.redAccent, shape: BoxShape.circle,
                                     border: Border.all(color: const Color(0xFF1A1A2E), width: 2),
                                   ),
                                   child: const Icon(Icons.close, size: 14, color: Colors.white),

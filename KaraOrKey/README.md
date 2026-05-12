@@ -1,134 +1,171 @@
 # KaraOrKey
 
-A networked karaoke application that turns any screen into a karaoke stage. A TV display syncs in real-time with DJ/singer clients on mobile devices — all over your local network.
+Application karaoké réseau en temps réel. Une TV affiche les paroles et joue la musique pour le public ; chaque chanteur utilise son téléphone comme micro et monitor personnel — zéro latence.
 
-## Features
+## Fonctionnalités
 
-- **AI-powered stem separation** — Downloads songs from YouTube and uses [Demucs](https://github.com/facebookresearch/demucs) to strip vocals and produce a clean instrumental backing track
-- **Synchronized lyrics** — Fetches `.lrc` timed lyrics via the LRCLIB API, with phonetic romanization for non-Latin scripts (K-Pop, Japanese, etc.)
-- **Multi-room support** — Create public or password-protected karaoke rooms; one TV display per room, unlimited singers
-- **Real-time sync** — All connected clients see the same queue, playback state, and lyrics via WebSocket (Socket.IO)
-- **Queue management** — Add, remove, and reorder songs; auto-play next track
-- **Cross-platform** — Flutter web UI runs on any browser; connect from phones, tablets, or laptops
+- **Séparation de stems par IA** — télécharge depuis YouTube via `yt-dlp` et utilise [Demucs](https://github.com/facebookresearch/demucs) pour isoler les voix et produire une piste instrumentale propre
+- **Paroles synchronisées** — récupérées via l'API [LRCLIB](https://lrclib.net), avec romanisation phonétique pour les scripts non-latins (K-Pop, japonais, etc.)
+- **Monitor chanteur** — le téléphone DJ joue la piste d'accompagnement localement en même temps que la TV ; le chanteur entend la musique + sa propre voix sans aucune latence réseau
+- **Multi-salles** — créez des salles publiques ou protégées par mot de passe ; une TV par salle, DJ illimités
+- **Sync temps réel** — file d'attente, état de lecture et paroles partagés via WebSocket (Socket.IO)
+- **Gestion de la bibliothèque** — ajout, suppression de chansons ; persistance des salles entre redémarrages
+- **Cross-platform** — interface Flutter compilée en WebAssembly, accessible depuis n'importe quel navigateur
 
-## Tech Stack
+## Stack technique
 
-| Layer | Technology |
-|-------|-----------|
+| Couche | Technologie |
+|--------|-------------|
 | Backend | Python 3, Flask, Flask-SocketIO, Eventlet |
-| Frontend | Flutter (compiled to WebAssembly) |
-| Audio download | yt-dlp |
-| Stem separation | Demucs (Hybrid Transformer) |
-| Audio processing | FFmpeg |
-| Lyrics | LRCLIB API |
-| Phonetics | Unidecode |
+| Frontend | Flutter (compilé en WebAssembly) |
+| Téléchargement audio | yt-dlp |
+| Séparation de stems | Demucs (Hybrid Transformer) |
+| Traitement audio | FFmpeg |
+| Paroles | LRCLIB API |
+| Phonétique | Unidecode |
 
-## Requirements
+## Prérequis
 
 - Python 3.8+
-- [FFmpeg](https://ffmpeg.org/download.html) — must be available in your system `PATH`
-- Windows (the included launcher is a `.bat` script)
+- [FFmpeg](https://ffmpeg.org/download.html) — doit être accessible dans le `PATH` système
+- Windows (le lanceur fourni est un script `.bat`)
 
-## Getting Started
+## Démarrage
 
-1. **Clone the repository**
+1. **Cloner le dépôt**
 
    ```bash
-   git clone https://github.com/your-username/KaraOrKey.git
+   git clone https://github.com/MarcVo00/KaraOrKey.git
    cd KaraOrKey
    ```
 
-2. **Install FFmpeg** and ensure it is in your system `PATH`.
+2. **Installer FFmpeg** et s'assurer qu'il est dans le `PATH`.
 
-3. **Run the launcher**
+3. **Construire l'interface Flutter** (nécessaire après un clone, les fichiers `.wasm` et `main.dart.js` sont dans le `.gitignore`)
 
-   Double-click `start.bat` or run it from a terminal:
+   ```bash
+   cd app
+   flutter build web --wasm
+   # Puis copier le résultat dans KaraOrKey/web/
+   xcopy /E /Y build\web\* ..\KaraOrKey\web\
+   ```
+
+4. **Lancer l'application**
+
+   Double-cliquer sur `KaraOrKey/start.bat` ou l'exécuter depuis un terminal :
 
    ```cmd
    start.bat
    ```
 
-   On first run, this will:
-   - Create a Python virtual environment under `backend/venv/`
-   - Install all Python dependencies from `backend/requirements.txt`
-   - Start the backend server on `http://localhost:5000`
-   - Start the web UI on `http://localhost:8080`
-   - Print your local network IP so other devices can connect
+   Au premier lancement, le script :
+   - Crée un environnement virtuel Python dans `backend/venv/`
+   - Installe toutes les dépendances Python
+   - Démarre le serveur backend sur `http://localhost:5000`
+   - Démarre l'interface web sur `http://localhost:8080`
 
-4. **Connect devices**
+5. **Connecter les appareils**
 
-   - Open `http://localhost:8080` on the TV/main screen
-   - On phones or other devices, open `http://<your-local-ip>:8080`
+   - Ouvrir `http://localhost:8080` sur la TV / l'écran principal
+   - Sur les téléphones, ouvrir l'application Flutter et entrer l'IP locale du PC (ex: `192.168.1.45`)
 
-## How It Works
+## Comment ça marche
 
-### Song Processing Pipeline
-
-```
-YouTube URL
-    → yt-dlp         (download best audio)
-    → FFmpeg          (convert to WAV)
-    → Demucs          (AI stem separation)
-    → LRCLIB API      (fetch synchronized lyrics)
-    → songs/{Artist - Track}/
-          accompaniment.wav   (instrumental backing track)
-          vocals.wav          (extracted vocals)
-          lyrics.lrc          (timed lyrics with phonetics)
-```
-
-Stem separation is CPU-intensive and typically takes 1–3 minutes per song.
-
-### Room Architecture
+### Pipeline de traitement d'une chanson
 
 ```
-Mobile DJ/Singer  ──┐
-Mobile DJ/Singer  ──┼──▶  Flask-SocketIO Server  ──▶  TV Display
-Mobile DJ/Singer  ──┘         (localhost:5000)
+URL YouTube
+    → yt-dlp          (téléchargement audio)
+    → FFmpeg           (conversion en WAV)
+    → Demucs           (séparation IA voix/instru)
+    → LRCLIB API       (paroles synchronisées + phonétique)
+    → songs/{Artiste - Titre}/
+          accompaniment.wav   (piste instrumentale)
+          vocals.wav          (voix extraites)
+          lyrics.lrc          (paroles horodatées)
 ```
 
-All playback commands, queue changes, and state updates are broadcast in real-time to every client in the room.
+La séparation est intensive en CPU et prend typiquement 1 à 3 minutes par chanson.
 
-## API Reference
+### Architecture monitor chanteur
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/rooms` | List all rooms |
-| POST | `/api/create_room` | Create a room (optional password) |
-| POST | `/api/delete_room` | Delete a room |
-| GET | `/api/songs` | List processed songs |
-| GET | `/api/search?q=` | Search YouTube |
-| POST | `/api/add_youtube` | Add a YouTube URL to the processing queue |
-| POST | `/api/cancel` | Cancel an active download/processing job |
-| GET | `/api/play/<song_id>/<file_type>` | Stream audio or lyrics file |
+```
+Téléphone DJ ──► backing track (local, 0 ms de latence)
+              ──► micro       (local, 0 ms de latence)
+              ──► commandes WebSocket ──► Serveur Flask-SocketIO ──► TV
+                                                                    (backing track + paroles)
+```
 
-### WebSocket Events
+Le téléphone du DJ joue la musique et les paroles en local — le chanteur a son propre retour scène. La TV diffuse la même piste pour le public et affiche les paroles en grand.
 
-| Event | Description |
-|-------|-------------|
-| `join_karaoke_room` | Join a room as TV or DJ |
-| `command_play` / `command_stop` | Control playback |
-| `add_to_queue` / `remove_from_queue` / `reorder_queue` | Manage song queue |
-| `play_next` | Skip to next song |
-| `sync_state` | Broadcast room state to all clients |
-| `rooms_updated` | Notify clients of room list changes |
+### Architecture multi-salles
 
-## Project Structure
+```
+Téléphone DJ  ──┐
+Téléphone DJ  ──┼──► Serveur Flask-SocketIO ──► TV (Écran)
+Téléphone DJ  ──┘        (localhost:5000)
+```
+
+## API
+
+| Méthode | Endpoint | Description |
+|---------|----------|-------------|
+| GET | `/api/rooms` | Liste des salles |
+| POST | `/api/create_room` | Créer une salle (mot de passe optionnel) |
+| POST | `/api/delete_room` | Supprimer une salle |
+| GET | `/api/songs` | Liste des chansons traitées |
+| GET | `/api/search?q=` | Recherche YouTube |
+| POST | `/api/add_youtube` | Ajouter une URL YouTube à la file de traitement |
+| POST | `/api/cancel` | Annuler un téléchargement en cours |
+| POST | `/api/delete_song` | Supprimer une chanson de la bibliothèque |
+| GET | `/api/play/<song_id>/<file_type>` | Streamer un fichier audio ou les paroles |
+
+### Événements WebSocket
+
+| Événement | Description |
+|-----------|-------------|
+| `join_karaoke_room` | Rejoindre une salle (TV ou DJ) |
+| `command_play` / `command_stop` | Contrôler la lecture |
+| `start_song` / `stop_song` | Déclenché vers tous les clients de la salle |
+| `add_to_queue` / `remove_from_queue` / `reorder_queue` | Gérer la file |
+| `play_next` | Passer au titre suivant |
+| `sync_state` | Diffuse l'état complet de la salle |
+| `rooms_updated` | Notifie les clients d'un changement de liste de salles |
+
+## Structure du projet
 
 ```
 KaraOrKey/
-├── start.bat               # Windows launcher
+├── start.bat                   # Lanceur Windows
 ├── backend/
-│   ├── server.py           # Flask + Socket.IO server
-│   ├── factory.py          # Song processing pipeline
-│   ├── requirements.txt    # Python dependencies
-│   ├── songs/              # Processed song library
-│   └── temp/               # Temporary processing files
-└── web/                    # Flutter web build (static)
+│   ├── server.py               # Serveur Flask + Socket.IO
+│   ├── factory.py              # Pipeline de traitement des chansons
+│   ├── requirements.txt        # Dépendances Python
+│   ├── rooms.json              # État des salles (généré au runtime, gitignored)
+│   ├── songs/                  # Bibliothèque de chansons (gitignored)
+│   └── temp/                   # Fichiers temporaires (gitignored)
+└── web/                        # Build Flutter WebAssembly (static)
     ├── index.html
-    ├── main.dart.js
+    ├── main.dart.js / *.wasm   # Générés par flutter build web (gitignored)
     └── ...
+
+app/                            # Sources Flutter
+├── lib/
+│   ├── main.dart               # Point d'entrée de l'application
+│   ├── config.dart             # URL du serveur (variable globale)
+│   ├── models/
+│   │   └── lyric_line.dart     # Modèle d'une ligne de paroles
+│   ├── screens/
+│   │   ├── server_setup_screen.dart    # Connexion au serveur
+│   │   ├── role_selection_screen.dart  # Choix DJ / TV
+│   │   ├── room_selection_screen.dart  # Liste et gestion des salles
+│   │   ├── mic_remote_screen.dart      # Panneau DJ + monitor chanteur
+│   │   └── tv_player_screen.dart       # Écran TV (paroles + progression)
+│   └── widgets/
+│       └── youtube_search_dialog.dart  # Recherche et ajout YouTube
+└── pubspec.yaml
 ```
 
-## License
+## Licence
 
 MIT

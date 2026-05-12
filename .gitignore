@@ -12,6 +12,9 @@
 **/songs/
 **/temp/
 
+# ── Runtime state (generated at startup, not source code) ───────────────────
+KaraOrKey/backend/rooms.json
+
 # ── Pretrained / downloaded model weights ────────────────────────────────────
 pretrained_models/
 ~/.cache/torch/
