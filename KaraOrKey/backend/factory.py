@@ -1,4 +1,5 @@
 import os
+import sys
 import subprocess
 import urllib.request
 import urllib.parse
@@ -167,7 +168,8 @@ def run_factory(youtube_url, task_id=None):
         f.write(lrc_content)
     
     logging.info(f"Lancement de Demucs pour : {folder_name}")
-    cmd = ["demucs", "--two-stems=vocals", "-n", "htdemucs", "-o", TEMP_DIR, temp_audio_path]
+    runner = os.path.join(BASE_DIR, "demucs_runner.py")
+    cmd = [sys.executable, runner, "--two-stems=vocals", "-n", "htdemucs", "-o", TEMP_DIR, temp_audio_path]
     demucs_output_folder = os.path.join(TEMP_DIR, "htdemucs", video_id)
 
     process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)

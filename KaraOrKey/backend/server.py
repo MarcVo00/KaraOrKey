@@ -142,7 +142,7 @@ def search_youtube():
         with YoutubeDL(ydl_opts) as ydl:
             # On cherche plus large pour avoir assez d'options après filtrage
             info = ydl.extract_info(f"ytsearch20:{query}", download=False)
-            forbidden = ["karaoke", "acoustic", "official video", "live", "cover", "instrumental", "clip", "m/v", " mv "]
+            forbidden = ["karaoke", "acoustic", "official video", "live", "cover", "instrumental", "clip", "m/v", " mv ", "lyrics", "lyric"]
             preferred, other = [], []
             for entry in info.get('entries', []):
                 title_lower = entry.get('title', '').lower()
