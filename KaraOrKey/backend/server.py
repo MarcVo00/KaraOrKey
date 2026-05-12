@@ -1,5 +1,5 @@
 import eventlet
-eventlet.monkey_patch() 
+eventlet.monkey_patch()
 
 from flask import Flask, jsonify, send_from_directory, request
 from flask_cors import CORS
@@ -7,6 +7,11 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 import os
 import uuid
 import time
+import shutil
+import logging
+import json
+
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%H:%M:%S')
 
 app = Flask(__name__)
 CORS(app)
@@ -14,14 +19,38 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SONGS_DIR = os.path.join(BASE_DIR, "songs")
+ROOMS_FILE = os.path.join(BASE_DIR, "rooms.json")
 active_downloads = {}
+clients = {}
 
-# --- NOUVEAU : Salles dynamiques ---
-# On garde juste une salle publique de base pour que la TV ait un endroit où aller au lancement
-rooms_state = {
-    "Salle Publique": {'current_song': None, 'queue': [], 'tv_sid': None, 'dj_sids': [], 'password': ''}
-}
-clients = {} 
+def _load_rooms():
+    """Charge les salles depuis le fichier JSON, ou retourne la salle par défaut."""
+    if os.path.exists(ROOMS_FILE):
+        try:
+            with open(ROOMS_FILE, 'r', encoding='utf-8') as f:
+                saved = json.load(f)
+            # On remet à zéro les états de session (sids) qui n'ont plus de sens après redémarrage
+            for r in saved.values():
+                r['tv_sid'] = None
+                r['dj_sids'] = []
+                r['current_song'] = None
+                r['queue'] = []
+            logging.info(f"{len(saved)} salle(s) chargée(s) depuis {ROOMS_FILE}")
+            return saved
+        except Exception as e:
+            logging.error(f"Impossible de lire rooms.json : {e}")
+    return {"Salle Publique": {'current_song': None, 'queue': [], 'tv_sid': None, 'dj_sids': [], 'password': ''}}
+
+def _save_rooms():
+    """Persiste les noms et mots de passe des salles sur disque."""
+    try:
+        to_save = {name: {'password': data['password']} for name, data in rooms_state.items()}
+        with open(ROOMS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(to_save, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Impossible d'écrire rooms.json : {e}")
+
+rooms_state = _load_rooms()
 
 @app.route('/')
 def home(): return "<h1>Serveur Karaorkey en ligne ! 🎤</h1>"
@@ -49,6 +78,7 @@ def create_room():
     if name in rooms_state: return jsonify({"error": "Une salle porte déjà ce nom."}), 400
     
     rooms_state[name] = {'current_song': None, 'queue': [], 'tv_sid': None, 'dj_sids': [], 'password': pwd}
+    _save_rooms()
     socketio.emit('rooms_updated', broadcast=True)
     return jsonify({"message": "Salle créée !"})
 
@@ -65,13 +95,30 @@ def delete_room():
     if rooms_state[name]['password'] and rooms_state[name]['password'] != pwd:
         return jsonify({"error": "Mot de passe incorrect !"}), 403
         
-    # On prévient tous ceux qui sont dans la salle qu'elle va fermer !
     socketio.emit('room_deleted', to=name)
     del rooms_state[name]
+    _save_rooms()
     socketio.emit('rooms_updated', broadcast=True)
     return jsonify({"message": "Salle supprimée."})
 
-# --- ANCIENNES ROUTES (Musiques & Téléchargements) ---
+# --- ROUTES DES MUSIQUES ---
+@app.route('/api/delete_song', methods=['POST'])
+def delete_song():
+    song_id = request.json.get('song_id', '').strip()
+    if not song_id or '..' in song_id or '/' in song_id or '\\' in song_id:
+        return jsonify({"error": "Identifiant invalide."}), 400
+    folder_path = os.path.join(SONGS_DIR, song_id)
+    if not os.path.isdir(folder_path):
+        return jsonify({"error": "Chanson introuvable."}), 404
+    try:
+        shutil.rmtree(folder_path)
+        logging.info(f"Chanson supprimée : {song_id}")
+        socketio.emit('library_updated', broadcast=True)
+        return jsonify({"message": "Chanson supprimée."})
+    except Exception as e:
+        logging.error(f"Erreur suppression chanson {song_id}: {e}")
+        return jsonify({"error": "Impossible de supprimer la chanson."}), 500
+
 @app.route('/api/songs', methods=['GET'])
 def get_songs():
     songs_list = []
@@ -137,7 +184,7 @@ def add_youtube():
         except ValueError as e:
             if str(e) == "NO_LYRICS": socketio.emit('download_error', {"message": f"❌ Aucune parole trouvée pour '{song_title}'."})
             elif str(e) == "BAD_DURATION": socketio.emit('download_error', {"message": f"⏱️ Décalage temporel ! Cherchez une version 'Audio' !"})
-        except Exception: pass
+        except Exception as e: logging.error(f"Erreur inattendue pour '{song_title}': {e}")
         finally:
             if task_id in active_downloads:
                 del active_downloads[task_id]

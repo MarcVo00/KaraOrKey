@@ -4,6 +4,7 @@ import urllib.request
 import urllib.parse
 import json
 import re
+import logging
 from yt_dlp import YoutubeDL
 
 try:
@@ -114,13 +115,12 @@ def fetch_lyrics_and_metadata(youtube_title, youtube_channel, yt_duration):
                             found_but_bad_duration = True
                             
     except Exception as e:
-        print(f"❌ Erreur API : {e}")
-        
+        logging.error(f"Erreur API LRCLIB : {e}")
+
     if found_but_bad_duration:
-        # On lance l'erreur spécifique qu'on a créée dans server.py
         raise ValueError("BAD_DURATION")
-        
-    print("❌ Aucune correspondance avec des paroles synchronisées.")
+
+    logging.warning("Aucune correspondance avec des paroles synchronisées.")
     return False
 
 def run_factory(youtube_url, task_id=None):
@@ -173,6 +173,7 @@ def run_factory(youtube_url, task_id=None):
         del active_processes[task_id]
         
     if process.returncode != 0:
+        logging.warning("Demucs interrompu (annulation ou erreur).")
         raise Exception("Demucs a été annulé par l'utilisateur.")
     
     demucs_output_folder = os.path.join(TEMP_DIR, "htdemucs", video_id)
