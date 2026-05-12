@@ -45,6 +45,12 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   bool _isDragging = false;
   double _dragPosition = 0.0;
 
+  // --- Décalage paroles (user offset, en ms) ---
+  // Positif = paroles décalées vers la droite (apparaissent plus tard)
+  // Négatif = paroles décalées vers la gauche (apparaissent plus tôt)
+  int _lyricsOffsetMs = 0;
+  String? _currentSongId; // pour sauvegarder l'offset par chanson
+
   // --- Favoris ---
   Set<String> _favorites = {};
   bool _showFavoritesOnly = false;
@@ -103,11 +109,8 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   Future<void> _toggleFavorite(String songId) async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      if (_favorites.contains(songId)) {
-        _favorites.remove(songId);
-      } else {
-        _favorites.add(songId);
-      }
+      if (_favorites.contains(songId)) _favorites.remove(songId);
+      else _favorites.add(songId);
     });
     await prefs.setStringList('favorites', _favorites.toList());
   }
@@ -117,6 +120,7 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   // ==========================================
 
   void _addToHistory(Map<String, dynamic> song) {
+    // On n'ajoute pas de doublon si la chanson est déjà en tête de liste
     if (_history.isEmpty || _history.first['id'] != song['id']) {
       setState(() => _history.insert(0, Map.from(song)));
     }
@@ -141,21 +145,47 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                   style: TextStyle(color: Colors.grey)))
               : ListView.builder(
                   itemCount: _history.length,
-                  itemBuilder: (ctx, i) => ListTile(
-                    leading: Icon(Icons.history,
-                        color: i == 0 ? Colors.pinkAccent : Colors.white38),
-                    title: Text(_history[i]['title'],
-                        style: TextStyle(
-                            color: i == 0 ? Colors.white : Colors.white70)),
-                    trailing: i == 0
-                        ? const Text("En cours",
-                            style: TextStyle(color: Colors.pinkAccent, fontSize: 12))
-                        : null,
-                  ),
+                  itemBuilder: (ctx, i) {
+                    final isPlaying = currentSong != null &&
+                        _history[i]['id'] == currentSong!['id'];
+                    return ListTile(
+                      leading: Icon(
+                        isPlaying ? Icons.play_circle : Icons.history,
+                        color: isPlaying ? Colors.pinkAccent : Colors.white38,
+                      ),
+                      title: Text(_history[i]['title'],
+                          style: TextStyle(
+                              color: isPlaying ? Colors.white : Colors.white70,
+                              fontWeight: isPlaying ? FontWeight.bold : FontWeight.normal)),
+                      trailing: isPlaying
+                          ? const Text("En cours",
+                              style: TextStyle(color: Colors.pinkAccent, fontSize: 12))
+                          : null,
+                    );
+                  },
                 ),
         ),
       ]),
     );
+  }
+
+  // ==========================================
+  // OFFSET PAROLES
+  // ==========================================
+
+  Future<void> _loadLyricsOffset(String songId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getInt('lyrics_offset_$songId') ?? 0;
+    if (mounted) setState(() => _lyricsOffsetMs = saved);
+  }
+
+  Future<void> _adjustOffset(int deltaMs) async {
+    final newOffset = _lyricsOffsetMs + deltaMs;
+    setState(() => _lyricsOffsetMs = newOffset);
+    if (_currentSongId != null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('lyrics_offset_$_currentSongId', newOffset);
+    }
   }
 
   // ==========================================
@@ -183,7 +213,6 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     socket.onDisconnect((_) {
       if (mounted) setState(() => isReconnecting = true);
     });
-
     socket.on('join_error', (data) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -207,7 +236,6 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
         queue = List<Map<String, dynamic>>.from(data['queue']);
         _isPaused = data['paused'] ?? false;
       });
-      // Reprise après reconnexion : song en cours côté serveur, player local arrêté
       if (_isSinging && currentSong != null && prevSong == null &&
           _localPlayer.processingState == ProcessingState.idle) {
         _startLocalPlayback(currentSong!['id'], currentSong!['title'],
@@ -218,8 +246,8 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     socket.on('start_song', (data) {
       if (mounted) {
         setState(() => _isPaused = false);
-        // Ajout à l'historique avant de changer currentSong
-        if (currentSong != null) _addToHistory(currentSong!);
+        // La chanson qui COMMENCE va dans l'historique
+        _addToHistory(Map<String, dynamic>.from(data));
       }
       if (_isSinging) _startLocalPlayback(data['id'], data['title']);
     });
@@ -231,22 +259,18 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
         _songPosition = Duration.zero; _songDuration = Duration.zero;
       });
     });
-
     socket.on('pause_song', (_) {
       _localPlayer.pause();
       if (mounted) setState(() => _isPaused = true);
     });
-
     socket.on('resume_song', (_) {
       _localPlayer.play();
       if (mounted) setState(() => _isPaused = false);
     });
-
     socket.on('seek_to', (data) async {
       final ms = (data['position_ms'] as num?)?.toInt() ?? 0;
       if (_isSinging) await _localPlayer.seek(Duration(milliseconds: ms));
     });
-
     socket.on('position_sync', (data) async {
       _lastKnownTvPositionMs = (data['position_ms'] as num?)?.toInt() ?? 0;
       if (!_isSinging) return;
@@ -257,7 +281,6 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
         await _localPlayer.seek(Duration(milliseconds: _lastKnownTvPositionMs));
       }
     });
-
     socket.on('download_progress', (data) {
       if (mounted) setState(() { if (data is List) activeDownloads = data; });
     });
@@ -278,8 +301,9 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   // ==========================================
 
   Future<void> _startLocalPlayback(String songId, String title, {int seekMs = 0}) async {
+    _currentSongId = songId;
     if (mounted) setState(() { _lyrics = []; _lyricIndex = -1; });
-    await _loadLyrics(songId);
+    await Future.wait([_loadLyrics(songId), _loadLyricsOffset(songId)]);
     try {
       await _localPlayer.stop();
       await _localPlayer.setUrl('$baseUrl/api/play/$songId/audio');
@@ -292,37 +316,55 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   Future<void> _loadLyrics(String songId) async {
     try {
       final r = await http.get(Uri.parse('$baseUrl/api/play/$songId/lyrics'));
-      if (r.statusCode == 200) {
-        final lines = utf8.decode(r.bodyBytes).split('\n');
-        final parsed = <LyricLine>[];
-        final re = RegExp(r"^\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)");
-        for (final line in lines) {
-          final m = re.firstMatch(line);
-          if (m != null) {
-            final text = m.group(4)!.trim();
-            if (text.isNotEmpty) {
-              final sub = m.group(3)!;
-              final ms = sub.length == 2 ? int.parse(sub) * 10 : int.parse(sub);
-              parsed.add(LyricLine(
-                timestamp: Duration(minutes: int.parse(m.group(1)!),
-                    seconds: int.parse(m.group(2)!), milliseconds: ms),
-                text: text,
-              ));
-            }
+      if (r.statusCode != 200) return;
+      final lines = utf8.decode(r.bodyBytes).split('\n');
+
+      // Lire le tag [offset:X] standard du format LRC
+      int lrcTagOffsetMs = 0;
+      final offsetTagRe = RegExp(r'^\[offset:([+-]?\d+)\]');
+      for (final line in lines) {
+        final m = offsetTagRe.firstMatch(line.trim());
+        if (m != null) { lrcTagOffsetMs = int.tryParse(m.group(1)!) ?? 0; break; }
+      }
+
+      final parsed = <LyricLine>[];
+      final re = RegExp(r"^\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)");
+      for (final line in lines) {
+        final m = re.firstMatch(line);
+        if (m != null) {
+          final text = m.group(4)!.trim();
+          if (text.isNotEmpty) {
+            final sub = m.group(3)!;
+            final rawMs = sub.length == 2 ? int.parse(sub) * 10 : int.parse(sub);
+            final baseMs = Duration(
+              minutes: int.parse(m.group(1)!),
+              seconds: int.parse(m.group(2)!),
+              milliseconds: rawMs,
+            ).inMilliseconds;
+            // Applique le tag LRC ; le user offset est appliqué dans _syncLyrics
+            final adjusted = (baseMs + lrcTagOffsetMs).clamp(0, 99999999);
+            parsed.add(LyricLine(
+              timestamp: Duration(milliseconds: adjusted),
+              text: text,
+            ));
           }
         }
-        if (mounted) setState(() => _lyrics = parsed);
       }
+      if (mounted) setState(() => _lyrics = parsed);
     } catch (_) {}
   }
 
   void _syncLyrics(Duration position) {
     if (_lyrics.isEmpty) return;
+    // Le user offset décale la position de lecture : si offset > 0, les paroles
+    // apparaissent plus tard (on avance artificiellement la position comparée)
+    final effectivePos = Duration(milliseconds:
+        (position.inMilliseconds - _lyricsOffsetMs).clamp(0, 99999999));
     for (int i = 0; i < _lyrics.length; i++) {
       final isLast = i == _lyrics.length - 1;
       final ok = isLast
-          ? position >= _lyrics[i].timestamp
-          : position >= _lyrics[i].timestamp && position < _lyrics[i + 1].timestamp;
+          ? effectivePos >= _lyrics[i].timestamp
+          : effectivePos >= _lyrics[i].timestamp && effectivePos < _lyrics[i + 1].timestamp;
       if (ok) { if (_lyricIndex != i) setState(() => _lyricIndex = i); break; }
     }
   }
@@ -341,13 +383,14 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
     setState(() => _isSinging = !_isSinging);
     if (_isSinging) {
       if (currentSong != null && !_isPaused) {
-        // Démarre directement à la position connue de la TV → zéro gap
         _startLocalPlayback(currentSong!['id'], currentSong!['title'],
             seekMs: _lastKnownTvPositionMs);
       }
     } else {
       _localPlayer.stop();
-      setState(() { _lyrics = []; _lyricIndex = -1; _songPosition = Duration.zero; });
+      setState(() {
+        _lyrics = []; _lyricIndex = -1; _songPosition = Duration.zero;
+      });
     }
   }
 
@@ -415,6 +458,17 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
   void _removeFromQueue(int i) => socket.emit('remove_from_queue', {'index': i});
 
   Future<void> _triggerDownload(String url, String title) async {
+    // Protection contre les doublons
+    if (activeDownloads.any((dl) => dl['title'] == title)) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Ce titre est déjà en cours de traitement.")));
+      return;
+    }
+    if (allSongs.any((s) => s['id'] == title)) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Ce titre est déjà dans la bibliothèque.")));
+      return;
+    }
     try {
       await http.post(Uri.parse('$baseUrl/api/add_youtube'),
           headers: {"Content-Type": "application/json"},
@@ -507,7 +561,6 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
       appBar: AppBar(
         title: Text("DJ - ${widget.roomName}"),
         actions: [
-          // Indicateur reconnexion
           if (isReconnecting)
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 8),
@@ -518,7 +571,6 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                 Text("Reconnexion...", style: TextStyle(fontSize: 12, color: Colors.orange)),
               ]),
             ),
-          // Historique
           IconButton(
             icon: Badge(
               isLabelVisible: _history.isNotEmpty,
@@ -528,7 +580,6 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
             onPressed: _showHistorySheet,
             tooltip: "Historique",
           ),
-          // Toggle "Je chante"
           Padding(
             padding: const EdgeInsets.only(right: 8),
             child: GestureDetector(
@@ -563,7 +614,7 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
       ),
       body: Column(children: [
 
-        // --- Monitor paroles + seek ---
+        // --- Monitor paroles + seek + offset ---
         if (currentSong != null && _isSinging)
           Container(
             width: double.infinity,
@@ -612,8 +663,8 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                     onChanged: (v) => setState(() => _dragPosition = v),
                     onChangeEnd: (v) {
                       setState(() => _isDragging = false);
-                      final ms = (v * _songDuration.inMilliseconds).round();
-                      socket.emit('command_seek', {'position_ms': ms});
+                      socket.emit('command_seek',
+                          {'position_ms': (v * _songDuration.inMilliseconds).round()});
                     },
                   ),
                 ),
@@ -629,6 +680,26 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                   ]),
                 ),
               ],
+              // Contrôles de décalage des paroles
+              if (_lyrics.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    _offsetButton("-1s", -1000),
+                    _offsetButton("-0.2s", -200),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Text(
+                        _lyricsOffsetMs == 0
+                            ? "Paroles ±0"
+                            : "Paroles ${_lyricsOffsetMs > 0 ? '+' : ''}${(_lyricsOffsetMs / 1000).toStringAsFixed(1)}s",
+                        style: const TextStyle(color: Colors.white38, fontSize: 11),
+                      ),
+                    ),
+                    _offsetButton("+0.2s", 200),
+                    _offsetButton("+1s", 1000),
+                  ]),
+                ),
             ]),
           ),
 
@@ -665,15 +736,14 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
               IconButton(
                   icon: Icon(_isPaused ? Icons.play_arrow : Icons.pause,
                       size: 28, color: _isPaused ? Colors.greenAccent : Colors.white70),
-                  onPressed: _togglePause, tooltip: _isPaused ? "Reprendre" : "Pause"),
+                  onPressed: _togglePause),
               IconButton(icon: const Icon(Icons.skip_next, size: 28, color: Colors.white),
-                  onPressed: _playNext, tooltip: "Suivant"),
+                  onPressed: _playNext),
             ],
             IconButton(
               icon: Icon(Icons.music_note, size: 22,
                   color: _showVolumeBar ? Colors.pinkAccent : Colors.white54),
               onPressed: () => setState(() => _showVolumeBar = !_showVolumeBar),
-              tooltip: "Volume musique",
             ),
           ]),
         ),
@@ -786,25 +856,18 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                     prefixIcon: Icon(Icons.person, size: 20),
                     border: OutlineInputBorder(), contentPadding: EdgeInsets.all(10)))),
             const SizedBox(width: 8),
-            // Toggle favoris
             GestureDetector(
               onTap: () => setState(() => _showFavoritesOnly = !_showFavoritesOnly),
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: _showFavoritesOnly
-                      ? Colors.amber.withOpacity(0.2)
-                      : Colors.transparent,
+                  color: _showFavoritesOnly ? Colors.amber.withOpacity(0.2) : Colors.transparent,
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                      color: _showFavoritesOnly ? Colors.amber : Colors.white24),
+                  border: Border.all(color: _showFavoritesOnly ? Colors.amber : Colors.white24),
                 ),
-                child: Icon(
-                  _showFavoritesOnly ? Icons.star : Icons.star_border,
-                  color: _showFavoritesOnly ? Colors.amber : Colors.white38,
-                  size: 22,
-                ),
+                child: Icon(_showFavoritesOnly ? Icons.star : Icons.star_border,
+                    color: _showFavoritesOnly ? Colors.amber : Colors.white38, size: 22),
               ),
             ),
           ]),
@@ -832,8 +895,7 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
                               subtitle: Text(song['has_lyrics'] ? "Paroles OK" : "Instru seul"),
                               trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                                 IconButton(
-                                    icon: Icon(isFav ? Icons.star : Icons.star_border,
-                                        size: 24,
+                                    icon: Icon(isFav ? Icons.star : Icons.star_border, size: 24,
                                         color: isFav ? Colors.amber : Colors.white38),
                                     onPressed: () => _toggleFavorite(song['id'])),
                                 IconButton(
@@ -851,4 +913,14 @@ class _MicRemoteScreenState extends State<MicRemoteScreen> {
       ]),
     );
   }
+
+  Widget _offsetButton(String label, int deltaMs) => TextButton(
+    style: TextButton.styleFrom(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      minimumSize: Size.zero,
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    ),
+    onPressed: () => _adjustOffset(deltaMs),
+    child: Text(label, style: const TextStyle(color: Colors.white38, fontSize: 11)),
+  );
 }

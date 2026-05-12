@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'package:just_audio/just_audio.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:app/config.dart';
 import 'package:app/models/lyric_line.dart';
 
@@ -33,6 +34,8 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
   List<dynamic> _queue = [];
   bool _isDragging = false;
   double _dragPosition = 0.0;
+  int _lyricsOffsetMs = 0;
+  String? _currentSongId;
 
   Timer? _syncTimer;
 
@@ -132,7 +135,10 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
   // ==========================================
 
   Future<void> _startVisuals(String songId, String title) async {
+    _currentSongId = songId;
     setState(() { currentTitle = title; lyrics = []; currentLyricIndex = -1; });
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) setState(() => _lyricsOffsetMs = prefs.getInt('lyrics_offset_$songId') ?? 0);
     await _loadLyrics(songId);
     try {
       await _tvPlayer.stop();
@@ -145,38 +151,61 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
   Future<void> _loadLyrics(String songId) async {
     try {
       final response = await http.get(Uri.parse('$baseUrl/api/play/$songId/lyrics'));
-      if (response.statusCode == 200) {
-        final lines = utf8.decode(response.bodyBytes).split('\n');
-        final parsed = <LyricLine>[];
-        final re = RegExp(r"^\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)");
-        for (final line in lines) {
-          final m = re.firstMatch(line);
-          if (m != null) {
-            final text = m.group(4)!.trim();
-            if (text.isNotEmpty) {
-              final sub = m.group(3)!;
-              final ms = sub.length == 2 ? int.parse(sub) * 10 : int.parse(sub);
-              parsed.add(LyricLine(
-                timestamp: Duration(minutes: int.parse(m.group(1)!),
-                    seconds: int.parse(m.group(2)!), milliseconds: ms),
-                text: text,
-              ));
-            }
+      if (response.statusCode != 200) return;
+      final lines = utf8.decode(response.bodyBytes).split('\n');
+
+      // Tag [offset:X] standard LRC
+      int lrcTagOffsetMs = 0;
+      final offsetTagRe = RegExp(r'^\[offset:([+-]?\d+)\]');
+      for (final line in lines) {
+        final m = offsetTagRe.firstMatch(line.trim());
+        if (m != null) { lrcTagOffsetMs = int.tryParse(m.group(1)!) ?? 0; break; }
+      }
+
+      final parsed = <LyricLine>[];
+      final re = RegExp(r"^\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)");
+      for (final line in lines) {
+        final m = re.firstMatch(line);
+        if (m != null) {
+          final text = m.group(4)!.trim();
+          if (text.isNotEmpty) {
+            final sub = m.group(3)!;
+            final rawMs = sub.length == 2 ? int.parse(sub) * 10 : int.parse(sub);
+            final baseMs = Duration(
+              minutes: int.parse(m.group(1)!),
+              seconds: int.parse(m.group(2)!),
+              milliseconds: rawMs,
+            ).inMilliseconds;
+            parsed.add(LyricLine(
+              timestamp: Duration(milliseconds: (baseMs + lrcTagOffsetMs).clamp(0, 99999999)),
+              text: text,
+            ));
           }
         }
-        if (mounted) setState(() => lyrics = parsed);
       }
+      if (mounted) setState(() => lyrics = parsed);
     } catch (_) {}
   }
 
   void _syncLyrics(Duration position) {
     if (lyrics.isEmpty) return;
+    final effectivePos = Duration(
+        milliseconds: (position.inMilliseconds - _lyricsOffsetMs).clamp(0, 99999999));
     for (int i = 0; i < lyrics.length; i++) {
       final isLast = i == lyrics.length - 1;
       final ok = isLast
-          ? position >= lyrics[i].timestamp
-          : position >= lyrics[i].timestamp && position < lyrics[i + 1].timestamp;
+          ? effectivePos >= lyrics[i].timestamp
+          : effectivePos >= lyrics[i].timestamp && effectivePos < lyrics[i + 1].timestamp;
       if (ok) { if (currentLyricIndex != i) setState(() => currentLyricIndex = i); break; }
+    }
+  }
+
+  Future<void> _adjustOffset(int deltaMs) async {
+    final newOffset = _lyricsOffsetMs + deltaMs;
+    setState(() => _lyricsOffsetMs = newOffset);
+    if (_currentSongId != null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('lyrics_offset_$_currentSongId', newOffset);
     }
   }
 
@@ -398,24 +427,46 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
                 ),
               ]),
 
-              // --- Panneau volume ---
+              // --- Panneau volume + offset ---
               if (_showVolumeBar)
                 Positioned(
-                  bottom: 50, left: 60, right: 60,
+                  bottom: 50, left: 40, right: 40,
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                     decoration: BoxDecoration(
-                      color: Colors.black87, borderRadius: BorderRadius.circular(30),
+                      color: Colors.black87, borderRadius: BorderRadius.circular(20),
                       border: Border.all(color: Colors.white24),
                     ),
-                    child: Row(children: [
-                      const Icon(Icons.volume_down, color: Colors.white54),
-                      Expanded(child: Slider(
-                        value: _volume, min: 0, max: 1,
-                        activeColor: const Color(0xFFE94560), inactiveColor: Colors.white24,
-                        onChanged: (v) { setState(() => _volume = v); _tvPlayer.setVolume(v); },
-                      )),
-                      const Icon(Icons.volume_up, color: Colors.white54),
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      // Volume
+                      Row(children: [
+                        const Icon(Icons.volume_down, color: Colors.white54),
+                        Expanded(child: Slider(
+                          value: _volume, min: 0, max: 1,
+                          activeColor: const Color(0xFFE94560), inactiveColor: Colors.white24,
+                          onChanged: (v) { setState(() => _volume = v); _tvPlayer.setVolume(v); },
+                        )),
+                        const Icon(Icons.volume_up, color: Colors.white54),
+                      ]),
+                      // Offset paroles
+                      if (lyrics.isNotEmpty) ...[
+                        const Divider(color: Colors.white12, height: 16),
+                        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                          _tvOffsetButton("-1s", -1000),
+                          _tvOffsetButton("-0.2s", -200),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            child: Text(
+                              _lyricsOffsetMs == 0
+                                  ? "Paroles ±0"
+                                  : "Paroles ${_lyricsOffsetMs > 0 ? '+' : ''}${(_lyricsOffsetMs / 1000).toStringAsFixed(1)}s",
+                              style: const TextStyle(color: Colors.white54, fontSize: 12),
+                            ),
+                          ),
+                          _tvOffsetButton("+0.2s", 200),
+                          _tvOffsetButton("+1s", 1000),
+                        ]),
+                      ],
                     ]),
                   ),
                 ),
@@ -425,6 +476,16 @@ class _TVPlayerScreenState extends State<TVPlayerScreen> {
       ),
     );
   }
+
+  Widget _tvOffsetButton(String label, int deltaMs) => TextButton(
+    style: TextButton.styleFrom(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      minimumSize: Size.zero,
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    ),
+    onPressed: () => _adjustOffset(deltaMs),
+    child: Text(label, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+  );
 
   Widget _buildWaitingScreen() {
     if (_queue.isEmpty) {

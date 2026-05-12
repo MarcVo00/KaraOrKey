@@ -140,15 +140,25 @@ def search_youtube():
         from yt_dlp import YoutubeDL
         ydl_opts = {'extract_flat': True, 'quiet': True, 'no_warnings': True}
         with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch15:{query}", download=False)
-            results = []
+            # On cherche plus large pour avoir assez d'options après filtrage
+            info = ydl.extract_info(f"ytsearch20:{query}", download=False)
             forbidden = ["karaoke", "acoustic", "official video", "live", "cover", "instrumental", "clip"]
+            preferred, other = [], []
             for entry in info.get('entries', []):
-                if not any(w in entry.get('title', '').lower() for w in forbidden):
-                    results.append({'id': entry.get('id'), 'title': entry.get('title'),
-                                    'url': f"https://www.youtube.com/watch?v={entry.get('id')}"})
-                if len(results) >= 5: break
-            return jsonify(results)
+                title_lower = entry.get('title', '').lower()
+                if any(w in title_lower for w in forbidden):
+                    continue
+                item = {
+                    'id': entry.get('id'),
+                    'title': entry.get('title'),
+                    'url': f"https://www.youtube.com/watch?v={entry.get('id')}",
+                }
+                # Les versions "audio" ont moins de post-traitement vidéo → timing plus fiable
+                if 'audio' in title_lower:
+                    preferred.append(item)
+                else:
+                    other.append(item)
+            return jsonify((preferred + other)[:5])
     except Exception:
         return jsonify({"error": "Erreur"}), 500
 
